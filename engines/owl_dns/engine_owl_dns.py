@@ -6,8 +6,8 @@ import validators
 import requests
 import whois
 from ipwhois import IPWhois
-from modules.dnstwist import dnstwist
-from modules.dkimsignatures import dkimlist
+from .modules.dnstwist import dnstwist
+from .modules.dkimsignatures import dkimlist
 from concurrent.futures import ThreadPoolExecutor
 from netaddr import IPAddress, IPNetwork
 from netaddr.core import AddrFormatError
@@ -661,7 +661,7 @@ def _saas_check(scan_id: str, asset: str, datatype: str) -> dict:
 
 def _do_seg_check(scan_id, asset_value):
     seg_dict = []
-    dns_records = __dns_resolve_asset(asset_value, "MX")
+    dns_records = _dns_resolve_asset(asset_value, "MX")
     has_seg = False
 
     if len(dns_records) == 0:
@@ -694,9 +694,9 @@ def _do_seg_check(scan_id, asset_value):
             this.scans[scan_id]["findings"]["seg_dict"][asset_value] = copy.deepcopy(
                 seg_dict
             )
-            this.scans[scan_id]["findings"]["seg_dict_dns_records"][
-                asset_value
-            ] = copy.deepcopy(dns_records)
+            this.scans[scan_id]["findings"]["seg_dict_dns_records"][asset_value] = (
+                copy.deepcopy(dns_records)
+            )
         else:
             this.scans[scan_id]["findings"]["no_seg"] = {
                 asset_value: "MX records found but no Secure Email Gateway set"
@@ -709,7 +709,7 @@ def _recursive_spf_lookups(spf_line):
         if "include:" in word:
             url = word.replace("include:", "")
             spf_lookups += 1
-            dns_resolve = __dns_resolve_asset(url, "TXT")
+            dns_resolve = _dns_resolve_asset(url, "TXT")
             for record in dns_resolve:
                 for value in record["values"]:
                     if "spf" in value:
@@ -719,7 +719,7 @@ def _recursive_spf_lookups(spf_line):
 
 def _do_dmarc_check(scan_id, asset_value):
     dmarc_dict = {"no_dmarc_record": "info"}
-    dns_records = __dns_resolve_asset(asset_value, "TXT")
+    dns_records = _dns_resolve_asset(asset_value, "TXT")
     for record in dns_records:
         for value in record["values"]:
             if "DMARC" in value:
@@ -747,7 +747,7 @@ def _do_dkim_check(scan_id, asset_value):
     dkim_found_list = {}
     for selector in dkimlist:
         dkim_record = selector + "._domainkey." + asset_value
-        dns_records = __dns_resolve_asset(dkim_record)
+        dns_records = _dns_resolve_asset(dkim_record)
         if len(dns_records) > 0:
             found_dkim = True
             for dns_record in dns_records:
@@ -765,13 +765,14 @@ def _do_dkim_check(scan_id, asset_value):
         }
 
 
-def _perform_spf_check(scan_id, asset_value):
-    dns_records = __dns_resolve_asset(asset_value, "TXT")
+def _perform_spf_check(scan_id: int, asset_value: str) -> dict:
+    """Check SPF record lookup"""
+    dns_records = _dns_resolve_asset(asset_value, "TXT")
     spf_dict = {"no_spf_found": "high", "spf_lookups": 0, "title_prefix": "No SPF"}
 
     for record in dns_records:
         for value in record["values"]:
-            if "spf" in value:
+            if "v=spf1" in value:
                 spf_dict.pop("no_spf_found")
                 spf_lookups = _recursive_spf_lookups(value)
                 spf_dict["spf_lookups"] = spf_lookups
@@ -793,6 +794,8 @@ def _perform_spf_check(scan_id, asset_value):
                 elif "all" not in value:
                     spf_dict["no_spf_all_or_?all"] = "high"
                     spf_dict["title_prefix"] = "No SPF or ALL"
+            else:
+                print("AIE")
 
     with this.scan_lock:
         this.scans[scan_id]["findings"]["spf_dict"] = {asset_value: spf_dict}
@@ -802,6 +805,63 @@ def _perform_spf_check(scan_id, asset_value):
     return spf_dict
 
 
+def _parse_spf_record(dns_records: list[str]) -> tuple[list, list]:
+    spf_issues = {
+        "directives_after_all": {
+            "title": "Directives after 'ALL'",
+            "description": '"all" directive is used as the rightmost directive in a record to provide an explicit'
+            'default. Directives after "all" are ignored and will never be tested.',
+        },
+        "no_spf_record": {
+            "title": "No SPF record"
+        },
+        "deprecated_spf_record": {
+            "title": "Deprecated SPF record"
+        },
+        "multiple_spf_records": {
+            "title": "Multiple SPF records"
+        },
+        "invalid_spf_record": {
+             "title": "Invalid SPF record"
+        },
+        "over_lookup": {},
+        "presence_of_ptr": {}
+
+    }
+    # Basic mechanisms, they contribute to the language framework.
+    # They do not specify a particular type of authorization scheme.
+    basic_mechanisms = ["all", "include"]
+    # Designated sender mechanisms, they are used to designate a set of <ip> addresses as being permitted or
+    # not permitted to use the <domain> for sending mail.
+    designed_sender_mechanisms = ["a", "mx", "ptr", "ip4", "ip6", "exists"]
+
+    for dns_record in dns_records:
+        # List of directives
+        spf_directives = dns_record.split()
+
+        # Check the version, and remove it from directives
+        if spf_directives[0] != "v=spf1":
+            raise ValueError("Do not contains SPF records")
+        spf_directives.pop(0)  # version is not a directive, remove it from directives
+
+        issues = []
+        # Mechanisms after "all" will never be tested. Mechanisms listed after "all" MUST be ignored.
+        if re.search(r"[-~+]?all [-~+\w]", dns_record):
+            issues.append(spf_issues["directives_after_all"])
+
+        results = [["Prefix", "Type", "Value", "Description"]]
+
+        for spf_directive in spf_directives:
+            directive_prefix = "?"
+            directive_value = ""
+            if ":" in spf_directive:
+                directive_type, directive_value = spf_directive.split(":")
+            else:
+                directive_type = spf_directive
+            results.append([directive_prefix, directive_type, directive_value])
+    return results, issues
+
+
 def _dns_resolve(scan_id, asset, check_subdomains=False):
     scan_lock = threading.RLock()
     with scan_lock:
@@ -809,34 +869,35 @@ def _dns_resolve(scan_id, asset, check_subdomains=False):
             this.scans[scan_id]["findings"]["dns_resolve"] = {}
         this.scans[scan_id]["findings"]["dns_resolve"][asset] = {}
         this.scans[scan_id]["findings"]["dns_resolve"][asset] = copy.deepcopy(
-            __dns_resolve_asset(asset)
+            _dns_resolve_asset(asset)
         )
     return this.scans[scan_id]["findings"]["dns_resolve"][asset]
 
 
-def __dns_resolve_asset(asset, type_of_record=False):
+def _dns_resolve_asset(asset, type_of_record: str = None) -> list[dict]:
     sub_res = []
-    try:
-        record_types = ["CNAME", "A", "AAAA", "MX", "NS", "TXT", "SOA", "SRV"]
-        if type_of_record:
-            record_types = [type_of_record]
-        for record_type in record_types:
-            try:
-                answers = this.resolver.query(asset, record_type)
-                sub_res.append(
-                    {
-                        "record_type": record_type,
-                        "values": [str(rdata) for rdata in answers],
-                    }
-                )
-            except dns.resolver.NoAnswer:
-                pass
-            except dns.resolver.Timeout:
-                pass
-            except Exception:
-                pass
-    except dns.resolver.NXDOMAIN:
-        pass
+    record_types = ["CNAME", "A", "AAAA", "MX", "NS", "TXT", "SOA", "SRV"]
+    if type_of_record:
+        record_types = [type_of_record]
+    for record_type in record_types:
+        try:
+            answers = this.resolver.resolve(asset, record_type)
+        except dns.resolver.NoAnswer:
+            pass
+        except dns.resolver.Timeout:
+            pass
+        except dns.resolver.NXDOMAIN:
+            pass
+        except Exception as e:
+            app.logger(f"DNS resolve raises an exception for asset '{asset}': {e}")
+        else:
+            sub_res.append(
+                {
+                    "record_type": record_type,
+                    "values": [str(rdata).strip('"') for rdata in answers],
+                }
+            )
+
     return sub_res
 
 
@@ -1039,13 +1100,13 @@ def _subdomain_bruteforce(scan_id, asset):
 
     # Check wildcard domain
     w_domain = "{}.{}".format(get_random_string(), asset)
-    if len(__dns_resolve_asset(w_domain)) > 0:
+    if len(_dns_resolve_asset(w_domain)) > 0:
         return res
 
     valid_sudoms = []
     for sub in SUB_LIST:
         subdom = ".".join((sub, asset))
-        results = __dns_resolve_asset(subdom)
+        results = _dns_resolve_asset(subdom)
 
         if len(results) > 0:
             valid_sudoms.append(subdom)
@@ -1109,7 +1170,7 @@ def _subdomain_enum(scan_id, asset):
     ):
         res_subdomains = {}
         for s in sub_res:
-            data = __dns_resolve_asset(s)
+            data = _dns_resolve_asset(s)
             if len(data) > 0:
                 res_subdomains.update({s: data})
 

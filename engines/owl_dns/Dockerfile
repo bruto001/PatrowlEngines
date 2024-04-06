@@ -17,7 +17,7 @@ WORKDIR /opt/patrowl-engines/owl_dns
 
 # Copy the current directory contents into the container at /
 COPY __init__.py .
-COPY engine-owl_dns.py .
+COPY engine_owl_dns.py .
 COPY owl_dns.json.sample owl_dns.json
 COPY requirements.txt .
 COPY README.md .
@@ -41,4 +41,4 @@ RUN pip3 install --trusted-host pypi.python.org -r requirements.txt
 EXPOSE 5006
 
 # Run app.py when the container launches
-CMD ["gunicorn", "engine-owl_dns:app", "-b", "0.0.0.0:5006", "--access-logfile", "-", "--threads", "10"]
+CMD ["gunicorn", "engine_owl_dns:app", "-b", "0.0.0.0:5006", "--access-logfile", "-", "--threads", "10"]
