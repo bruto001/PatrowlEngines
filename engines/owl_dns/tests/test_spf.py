@@ -1,10 +1,11 @@
 import unittest
-import unittest.mock as mock
+from unittest import mock
 
 from engines.owl_dns.engine_owl_dns import (
     _dns_resolve_asset,
     _parse_spf_record,
 )
+from engines.owl_dns.etc.issues import spf_issues
 
 
 class TestSPF(unittest.TestCase):
@@ -24,49 +25,144 @@ class TestSPF(unittest.TestCase):
                 {
                     "record_type": "TXT",
                     "values": ["v=spf1 include:spf.protection.outlook.com -all"],
+                    "answers": ['"v=spf1 include:spf.protection.outlook.com -all"'],
                 },
             ],
         )
 
-    def test_parse_spf_record_with_no_spf_record(self):
+    def test_parse_spf_record_with_no_dns_record(self):
         # Arrange
-        dns_record = "BLA-BLA-BLA"
+        dns_records = []
 
         # Act and Assert
-        with self.assertRaises(ValueError) as cm:
-            _parse_spf_record(dns_record=dns_record)
+        result, issues = _parse_spf_record(dns_records=dns_records)
 
-        self.assertEqual(str(cm.exception), "Do not contains SPF records")
+        self.assertCountEqual(
+            issues,
+            [spf_issues.NO_SPF_RECORD],
+        )
+
+    def test_parse_spf_record_with_no_spf_record(self):
+        # Arrange
+        dns_records = ['"BLA-BLA-BLA"', '"BLA-BLA-BLA-2"']
+
+        # Act and Assert
+        result, issues = _parse_spf_record(dns_records=dns_records)
+
+        self.assertCountEqual(
+            issues,
+            [spf_issues.NO_SPF_RECORD],
+        )
+
+    def test_parse_spf_record_with_multiple_spf_records(self):
+        # Arrange
+        dns_records = [
+            '"v=spf1 include:spf.protection.outlook -all"',
+            '"v=spf1 include:_spf.google.com ~all"',
+            '"v=spf1 redirect=_spf.facebook.com"',
+        ]
+
+        # Act and Assert
+        result, issues = _parse_spf_record(dns_records=dns_records)
+
+        self.assertCountEqual(
+            issues,
+            [spf_issues.MULTIPLE_SPF_RECORDS],
+        )
 
     def test_parse_spf_record_with_directive_after_all(self):
         # Arrange
         dns_records = [
-            "v=spf1 +all include:spf.protection.outlook",
-            "v=spf1 ~all include:spf.protection.outlook",
-            "v=spf1 -all include:spf.protection.outlook",
+            '"v=spf1 +all include:spf.protection.outlook"',
+            '"v=spf1 ~all include:spf.protection.outlook"',
+            '"v=spf1 -all include:spf.protection.outlook"',
         ]
 
         # Act and Assert
         for dns_record in dns_records:
-            result, issues = _parse_spf_record(dns_record=dns_record)
+            result, issues = _parse_spf_record(dns_records=[dns_record])
 
             self.assertCountEqual(
                 issues,
                 [
-                    {
-                        "title": 'Directives after "all" are not allowed',
-                        "description": '"all" directive is used as the rightmost directive in a record to provide an '
-                        'explicit default.Directives after "all" are ignored and will never be tested.',
-                    }
+                    spf_issues.DIRECTIVES_AFTER_ALL
                 ],
             )
+
+    def test_parse_spf_record_with_string_too_long(self):
+        # Arrange
+        dns_records = [
+            '"v=spf1 include:spf.protection.outlook veryloooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
+            "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            "ooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            'oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooog -all"',
+        ]
+
+        # Act and Assert
+        result, issues = _parse_spf_record(dns_records=dns_records)
+
+        self.assertCountEqual(
+            issues,
+            [spf_issues.STRING_TOO_LONG],
+        )
+
+    def test_parse_spf_record_with_multiple_strings_too_long(self):
+        # Arrange
+        dns_records = [
+            '"v=spf1 include:spf.protection.outlook veryloooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
+            "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            'oooooooooooooooooooooooooooooooooooooooooooo" "ooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
+            "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            'ooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooog -all"',
+        ]
+
+        # Act and Assert
+        result, issues = _parse_spf_record(dns_records=dns_records)
+
+        self.assertCountEqual(
+            issues,
+            [spf_issues.STRING_TOO_LONG],
+        )
+
+    def test_parse_spf_record_with_multiple_correct_strings_length(self):
+        # Arrange
+        dns_records = [
+            '"v=spf1 include:spf.protection.outlook veryloooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
+            "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            'oooooooooooooooooooooooooooooooooooooooooooo" "ooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
+            "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+            'oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooog -all"',
+        ]
+
+        # Act and Assert
+        result, issues = _parse_spf_record(dns_records=dns_records)
+
+        self.assertCountEqual(
+            issues,
+            [],
+        )
+
+    def test_parse_spf_record_with_ptr_mechanism(self):
+        # Arrange
+        dns_records = [
+            '"v=spf1 include:spf.protection.outlook ptr -all"'
+        ]
+
+        # Act and Assert
+        result, issues = _parse_spf_record(dns_records=dns_records)
+
+        self.assertCountEqual(
+            issues,
+            [spf_issues.PRESENCE_OF_PTR],
+        )
 
     def test_parse_spf_record_with_simple_spf_record(self):
         # Arrange: set up the mock with a random string as a DNS record
         dns_record = "v=spf1 include:spf.protection.outlook.com -all"
 
         # Act and Assert
-        result = _parse_spf_record(dns_record=dns_record)
+        result, issues = _parse_spf_record(dns_records=[dns_record])
 
         self.assertDictEqual(
             result, {"include": ["spf.protection.outlook.com"], "all": []}

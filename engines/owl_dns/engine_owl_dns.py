@@ -1,19 +1,34 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, sys, json, time, urllib, hashlib, threading
-import datetime, copy, dns.resolver, socket, optparse, random, string
-from flask import Flask, request, jsonify, redirect, url_for, send_from_directory
-import validators
-import requests
-import whois
-from ipwhois import IPWhois
-from .modules.dnstwist import dnstwist
-from .modules.dkimsignatures import dkimlist
+import copy
+import datetime
+import hashlib
+import json
+import optparse
+import os
+import random
+import re
+import socket
+import string
+import sys
+import threading
+import time
+import urllib
 from concurrent.futures import ThreadPoolExecutor
+
+import dns.resolver
+import requests
+import validators
+import whois
+from flask import Flask, jsonify, redirect, request, send_from_directory, url_for
+from ipwhois import IPWhois
 from netaddr import IPAddress, IPNetwork
 from netaddr.core import AddrFormatError
-import re
+
+from .etc.issues import spf_issues
+from .modules.dkimsignatures import dkimlist
+from .modules.dnstwist import dnstwist
 
 app = Flask(__name__)
 APP_DEBUG = os.environ.get("DEBUG", "").lower() in ["true", "1", "yes", "y", "on"]
@@ -230,7 +245,7 @@ def start_scan():
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
                 th = threading.Thread(
-                    target=_perform_spf_check, args=(scan_id, asset["value"])
+                    target=_do_spf_check, args=(scan_id, asset["value"])
                 )
                 th.start()
                 this.scans[scan_id]["threads"].append(th)
@@ -767,69 +782,52 @@ def _do_dkim_check(scan_id, asset_value):
         }
 
 
-def _perform_spf_check(scan_id: int, asset_value: str) -> dict:
+def _do_spf_check(scan_id: int, asset_value: str) -> None:
     """Check SPF record lookup"""
-    dns_records = _dns_resolve_asset(asset_value, "TXT")
+    dns_txt_records = _dns_resolve_asset(asset_value, "TXT")
+    results, issues = _parse_spf_record(dns_txt_records[0].get("answers"))
+
+    dns_spf_records = _dns_resolve_asset(asset_value, "SPF")
+    if dns_spf_records[0].get("answers"):
+        issues.append(spf_issues.DEPRECATED_SPF_RECORD)
+
     spf_dict = {"no_spf_found": "high", "spf_lookups": 0, "title_prefix": "No SPF"}
 
-    for record in dns_records:
-        for value in record["values"]:
-            if "v=spf1" in value:
-                spf_dict.pop("no_spf_found")
-                spf_lookups = _recursive_spf_lookups(value)
-                spf_dict["spf_lookups"] = spf_lookups
-                if spf_lookups > 10:
-                    spf_dict["spf_too_many_lookups"] = "medium"
-                    spf_dict["title_prefix"] = "Too many lookups"
-                if "+all" in value:
-                    spf_dict["+all_spf_found"] = "very high"
-                    spf_dict["title_prefix"] = "All SPF"
-                elif "~all" in value:
-                    spf_dict["~all_spf_found"] = "medium"
-                    spf_dict["title_prefix"] = "All SPF"
-                elif "?all" in value:
-                    spf_dict["no_spf_all_or_?all"] = "high"
-                    spf_dict["title_prefix"] = "No SPF or ALL"
-                elif "-all" in value:
-                    spf_dict["-all_spf_found?all"] = "info"
-                    spf_dict["title_prefix"] = "All SPF"
-                elif "all" not in value:
-                    spf_dict["no_spf_all_or_?all"] = "high"
-                    spf_dict["title_prefix"] = "No SPF or ALL"
-            else:
-                print("AIE")
+    # for record in dns_records:
+    #     for value in record["values"]:
+    #         if "v=spf1" in value:
+    #             spf_dict.pop("no_spf_found")
+    #             spf_lookups = _recursive_spf_lookups(value)
+    #             spf_dict["spf_lookups"] = spf_lookups
+    #             if spf_lookups > 10:
+    #                 spf_dict["spf_too_many_lookups"] = "medium"
+    #                 spf_dict["title_prefix"] = "Too many lookups"
+    #             if "+all" in value:
+    #                 spf_dict["+all_spf_found"] = "very high"
+    #                 spf_dict["title_prefix"] = "All SPF"
+    #             elif "~all" in value:
+    #                 spf_dict["~all_spf_found"] = "medium"
+    #                 spf_dict["title_prefix"] = "All SPF"
+    #             elif "?all" in value:
+    #                 spf_dict["no_spf_all_or_?all"] = "high"
+    #                 spf_dict["title_prefix"] = "No SPF or ALL"
+    #             elif "-all" in value:
+    #                 spf_dict["-all_spf_found?all"] = "info"
+    #                 spf_dict["title_prefix"] = "All SPF"
+    #             elif "all" not in value:
+    #                 spf_dict["no_spf_all_or_?all"] = "high"
+    #                 spf_dict["title_prefix"] = "No SPF or ALL"
+    #         else:
+    #             print("AIE")
 
-    with this.scan_lock:
-        this.scans[scan_id]["findings"]["spf_dict"] = {asset_value: spf_dict}
-        this.scans[scan_id]["findings"]["spf_dict_dns_records"] = {
-            asset_value: dns_records
-        }
-    return spf_dict
+    # with this.scan_lock:
+    #     this.scans[scan_id]["findings"]["spf_dict"] = {asset_value: spf_dict}
+    #     this.scans[scan_id]["findings"]["spf_dict_dns_records"] = {
+    #         asset_value: dns_records
+    #     }
 
 
 def _parse_spf_record(dns_records: list[str]) -> tuple[list, list]:
-    spf_issues = {
-        "directives_after_all": {
-            "title": "Directives after 'ALL'",
-            "description": '"all" directive is used as the rightmost directive in a record to provide an explicit'
-            'default. Directives after "all" are ignored and will never be tested.',
-        },
-        "no_spf_record": {
-            "title": "No SPF record"
-        },
-        "deprecated_spf_record": {
-            "title": "Deprecated SPF record"
-        },
-        "multiple_spf_records": {
-            "title": "Multiple SPF records"
-        },
-        "invalid_spf_record": {
-             "title": "Invalid SPF record"
-        },
-        "over_lookup": {},
-        "presence_of_ptr": {}
-
-    }
     # Basic mechanisms, they contribute to the language framework.
     # They do not specify a particular type of authorization scheme.
     basic_mechanisms = ["all", "include"]
@@ -837,21 +835,31 @@ def _parse_spf_record(dns_records: list[str]) -> tuple[list, list]:
     # not permitted to use the <domain> for sending mail.
     designed_sender_mechanisms = ["a", "mx", "ptr", "ip4", "ip6", "exists"]
 
-    for dns_record in dns_records:
-        # List of directives
-        spf_directives = dns_record.split()
+    spf_record_count = 0
+    results = [["Prefix", "Type", "Value", "Description"]]
+    issues = []
 
-        # Check the version, and remove it from directives
+    for dns_record in dns_records:
+        value = dns_record.strip('"').replace('" "', " ")
+        # List of directives
+        spf_directives = value.split()
+
+        # Check the version
         if spf_directives[0] != "v=spf1":
-            raise ValueError("Do not contains SPF records")
+            continue
+        spf_record_count += 1
         spf_directives.pop(0)  # version is not a directive, remove it from directives
 
-        issues = []
-        # Mechanisms after "all" will never be tested. Mechanisms listed after "all" MUST be ignored.
-        if re.search(r"[-~+]?all [-~+\w]", dns_record):
-            issues.append(spf_issues["directives_after_all"])
+        # Issue: DIRECTIVES_AFTER_ALL
+        if re.search(r"[-~+]?all [-~+\w]", value):
+            issues.append(spf_issues.DIRECTIVES_AFTER_ALL)
 
-        results = [["Prefix", "Type", "Value", "Description"]]
+        # Issue: STRING_TOO_LONG
+        maximum_string_length = 255
+        for character_string in dns_record.strip('"').split('" "'):
+            if len(character_string) > maximum_string_length:
+                issues.append(spf_issues.STRING_TOO_LONG)
+                continue
 
         for spf_directive in spf_directives:
             directive_prefix = "?"
@@ -860,7 +868,19 @@ def _parse_spf_record(dns_records: list[str]) -> tuple[list, list]:
                 directive_type, directive_value = spf_directive.split(":")
             else:
                 directive_type = spf_directive
+
+            if directive_type == "ptr":
+                issues.append(spf_issues.PRESENCE_OF_PTR)
+
             results.append([directive_prefix, directive_type, directive_value])
+
+    # Issue: NO_SPF_RECORD
+    if spf_record_count == 0:
+        issues.append(spf_issues.NO_SPF_RECORD)
+    # Issue: MULTIPLE_SPF_RECORDS
+    elif spf_record_count > 1:
+        issues.append(spf_issues.MULTIPLE_SPF_RECORDS)
+
     return results, issues
 
 
@@ -876,7 +896,9 @@ def _dns_resolve(scan_id, asset, check_subdomains=False):
     return this.scans[scan_id]["findings"]["dns_resolve"][asset]
 
 
-def _dns_resolve_asset(asset, type_of_record: str = None) -> list[dict]:
+def _dns_resolve_asset(
+    asset: str, type_of_record: str = None
+) -> list[dict[str, str | list[str]]]:
     sub_res = []
     record_types = ["CNAME", "A", "AAAA", "MX", "NS", "TXT", "SOA", "SRV"]
     if type_of_record:
@@ -896,7 +918,10 @@ def _dns_resolve_asset(asset, type_of_record: str = None) -> list[dict]:
             sub_res.append(
                 {
                     "record_type": record_type,
-                    "values": [str(rdata).strip('"') for rdata in answers],
+                    "values": [
+                        str(rdata).strip('"').replace('" "', " ") for rdata in answers
+                    ],
+                    "answers": [str(rdata) for rdata in answers],
                 }
             )
 
@@ -1483,13 +1508,10 @@ def _parse_results(scan_id):
                 }
             )
 
-    if "spf_dict" in scan["findings"].keys():
-        for asset in scan["findings"]["spf_dict"].keys():
+    if "spf_dict" in scan["findings"]:
+        for asset in scan["findings"]["spf_dict"]:
             spf_check = scan["findings"]["spf_dict"][asset]
             spf_check_dns_records = scan["findings"]["spf_dict_dns_records"][asset]
-            spf_hash = hashlib.sha1(
-                str(spf_check_dns_records).encode("utf-8")
-            ).hexdigest()[:6]
             spf_check.pop("spf_lookups")
             title_prefix = spf_check.pop("title_prefix")
 
