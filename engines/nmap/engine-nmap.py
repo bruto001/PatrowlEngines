@@ -20,51 +20,102 @@ from flask import Flask, request, jsonify, redirect, url_for, send_from_director
 import xml.etree.ElementTree as ET
 import banner
 
+# Own library imports
+from PatrowlEnginesUtils.PatrowlEngine import _json_serial
+from PatrowlEnginesUtils.PatrowlEngine import PatrowlEngine
+from PatrowlEnginesUtils.PatrowlEngineExceptions import PatrowlEngineExceptions
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
 app = Flask(__name__)
 APP_DEBUG = os.environ.get("DEBUG", "").lower() in ["true", "1", "yes", "y", "on"]
+APP_MAXSCANS = int(os.environ.get("APP_MAXSCANS", 5))
+
 APP_HOST = "0.0.0.0"
 APP_PORT = 5001
-APP_MAXSCANS = int(os.environ.get("APP_MAXSCANS", 5))
 APP_SCAN_TIMEOUT_DEFAULT = int(os.environ.get("APP_SCAN_TIMEOUT_DEFAULT", 7200))
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 this = sys.modules[__name__]
-this.scanner = {}
-this.scan_id = 1
-this.scans = {}
 
-
-# Generic functions
-def _json_serial(obj):
-    if isinstance(obj, datetime.datetime):
-        serial = obj.isoformat()
-        return serial
-    raise TypeError("Type not serializable")
+engine = PatrowlEngine(
+    app=app, base_dir=BASE_DIR, name=APP_ENGINE_NAME, max_scans=APP_MAXSCANS
+)
+this.engine = engine
 
 
 # Route actions
 @app.route("/")
 def default():
     """Handle default route."""
-    return redirect(url_for("index"))
+    return engine.default()
 
 
 @app.route("/engines/nmap/")
 def index():
-    """Handle index route."""
-    return jsonify({"page": "index"})
+    """Return index page."""
+    return engine.index()
+
+
+@app.route("/engines/nmap/liveness")
+def liveness():
+    """Return liveness page."""
+    return engine.liveness()
+
+
+@app.route("/engines/nmap/readiness")
+def readiness():
+    """Return readiness page."""
+    return engine.readiness()
+
+
+@app.route("/engines/nmap/info")
+def info():
+    """Get info on running engine."""
+    return engine.info()
+
+
+@app.route("/engines/nmap/clean")
+def clean():
+    """Clean all scans."""
+    reloadconfig()
+    return engine.clean()
+
+
+@app.route("/engines/nmap/clean/<scan_id>")
+def clean_scan(scan_id):
+    """Clean scan identified by id."""
+    return engine.clean_scan(scan_id)
+
+
+def _engine_is_busy():
+    """Returns if engine is busy scanning."""
+    return engine._engine_is_busy()
+
+
+@app.route("/engines/nmap/status")
+def status():
+    """Get status on engine and all scans."""
+    return engine.get_status()
+
+
+@app.route("/engines/nuclei/getreport/<scan_id>")
+def getreport(scan_id):
+    """Get report on finished scans."""
+    return engine.getreport(scan_id)
 
 
 def loadconfig():
     """Load configuration from local file."""
+    res = {"page": "loadconfig"}
     conf_file = f"{BASE_DIR}/nmap.json"
     if os.path.exists(conf_file):
         json_data = open(conf_file)
         this.scanner = json.load(json_data)
-        this.scanner["status"] = "READY"
     else:
         this.scanner["status"] = "ERROR"
         return {"status": "ERROR", "reason": "config file not found."}
+
     if not os.path.isfile(this.scanner["path"]):
         this.scanner["status"] = "ERROR"
         return {"status": "ERROR", "reason": "path to nmap binary not found."}
@@ -74,6 +125,16 @@ def loadconfig():
         version_file = open(version_filename, "r")
         this.scanner["version"] = version_file.read().rstrip("\n")
         version_file.close()
+
+    this.scanner["status"] = "READY"
+    res.update(
+        {
+            "status": "success",
+            "message": "Config file loaded.",
+            "config": engine.scanner,
+        }
+    )
+    return res
 
 
 @app.route("/engines/nmap/reloadconfig")
@@ -85,6 +146,38 @@ def reloadconfig():
     return jsonify(res)
 
 
+@app.errorhandler(404)
+def page_not_found(e):
+    """Page not found."""
+    return engine.page_not_found()
+
+
+@app.route("/engines/nmap/test")
+def test():
+    """Return test page."""
+    return engine.test()
+
+
+@app.route("/engines/nmap/status/<scan_id>")
+def status_scan(scan_id):
+    """Get status on scan identified by id."""
+    return engine.status_scan(scan_id)
+
+
+# Stop all scans
+@app.route("/engines/nmap/stopscans")
+def stop():
+    """Stop all scans."""
+    return engine.stop_scan()
+
+
+@app.route("/engines/nmap/stop/<scan_id>")
+def stop_scan(scan_id):
+    """Stop scan identified by id."""
+    return engine.stop_scan(scan_id)
+
+
+##########################
 @app.route("/engines/nmap/startscan", methods=["POST"])
 def start():
     res = {"page": "startscan"}
@@ -137,14 +230,14 @@ def start():
         )
         return jsonify(res), 503
 
-    if type(data["options"]) is str:
+    if isinstance(data["options"], str):
         data["options"] = json.loads(data["options"])
 
     scan = {
         "assets": data["assets"],
-        "futures": [],
-        "threads": [],
+        "threads": {},
         "proc": None,
+        "position": data["position"],
         "options": data["options"],
         "scan_id": scan_id,
         "status": "STARTED",
@@ -152,21 +245,21 @@ def start():
         "started_at": int(time.time() * 1000),
         "nb_findings": 0,
     }
-
     this.scans.update({scan_id: scan})
-    th = threading.Thread(target=_scan_thread, args=(scan_id,))
-    th.start()
-    this.scans[scan_id]["threads"].append(th)
 
-    # th = this.pool.submit(_scan_thread, args=(scan_id,))
-    # this.scans[scan_id]['futures'].append(th)
+    app.logger.debug("Launching thread for asset list")
+    th = threading.Thread(
+        target=_scan_thread,
+        kwargs={"scan_id": scan_id, "thread_id": 0},
+    )
+    th.start()
+    # this.scans[scan_id]["threads"].append(th)
 
     res.update({"status": "accepted", "details": {"scan_id": scan["scan_id"]}})
-
     return jsonify(res)
 
 
-def _scan_thread(scan_id):
+def _scan_thread(scan_id, thread_id):
     hosts = []
 
     for asset in this.scans[scan_id]["assets"]:
@@ -376,78 +469,6 @@ def _scan_thread(scan_id):
     return True
 
 
-@app.route("/engines/nmap/clean")
-def clean():
-    res = {"page": "clean"}
-
-    stop()
-    this.scans.clear()
-    loadconfig()
-    res.update({"status": "SUCCESS"})
-    return jsonify(res)
-
-
-@app.route("/engines/nmap/clean/<scan_id>")
-def clean_scan(scan_id):
-    res = {"page": "clean_scan"}
-    res.update({"scan_id": scan_id})
-
-    if scan_id not in this.scans.keys():
-        res.update({"status": "error", "reason": f"scan_id '{scan_id}' not found"})
-        return jsonify(res)
-
-    stop_scan(scan_id)
-    this.scans.pop(scan_id)
-    res.update({"status": "removed"})
-    return jsonify(res)
-
-
-# Stop all scans
-@app.route("/engines/nmap/stopscans")
-def stop():
-    res = {"page": "stopscans"}
-
-    for scan_id in this.scans.keys():
-        stop_scan(scan_id)
-
-    res.update({"status": "SUCCESS"})
-
-    return jsonify(res)
-
-
-@app.route("/engines/nmap/stop/<scan_id>")
-def stop_scan(scan_id):
-    res = {"page": "stopscan"}
-
-    if scan_id not in this.scans.keys():
-        res.update({"status": "error", "reason": f"scan_id '{scan_id}' not found"})
-        return jsonify(res)
-
-    # Stop the nmap cmd
-    proc = this.scans[scan_id]["proc"]
-    if hasattr(proc, "pid"):
-        if psutil.pid_exists(proc.pid):
-            psutil.Process(proc.pid).terminate()
-        res.update(
-            {
-                "status": "TERMINATED",
-                "details": {
-                    "pid": proc.pid,
-                    "cmd": this.scans[scan_id]["proc_cmd"],
-                    "scan_id": scan_id,
-                },
-            }
-        )
-
-    # Stop the thread '_scan_thread'
-    for th in this.scans[scan_id]["threads"]:
-        th.join()
-
-    this.scans[scan_id]["status"] = "STOPPED"
-    # this.scans[scan_id]["finished_at"] = int(time.time() * 1000)
-    return jsonify(res)
-
-
 @app.route("/engines/nmap/status/<scan_id>")
 def scan_status(scan_id):
     res = {"page": "status", "status": "SCANNING"}
@@ -506,78 +527,6 @@ def scan_status(scan_id):
         psutil.Process(proc.pid).terminate()
 
     # print(scan_id, res['status'], psutil.pid_exists(proc.pid), hasattr(proc, "pid"), this.scans[scan_id]["issues_available"], psutil.Process(proc.pid).status())
-    return jsonify(res)
-
-
-def _engine_is_busy():
-    """Returns if engine is busy scanning."""
-    scans_count = 0
-    # for scan_id, scan_infos in this.scans:
-    for scan_id in this.scans.keys():
-        # do not use scan_status as it updates all scans
-        # TODO rewrite function later
-        if this.scans[scan_id]["status"] in ["SCANNING", "STARTED"]:
-            scans_count += 1
-        if scans_count >= APP_MAXSCANS:
-            return True
-    return False
-
-
-@app.route("/engines/nmap/status")
-def status():
-    res = {"page": "status"}
-    this.scanner["status"] = "READY"
-
-    # display info on the scanner
-    res.update({"scanner": this.scanner})
-
-    # display the status of scans performed
-    scans = {}
-    for scan in this.scans.keys():
-        scan_status(scan)
-        scans.update(
-            {
-                scan: {
-                    "status": this.scans[scan]["status"],
-                    "options": this.scans[scan]["options"],
-                    "nb_findings": this.scans[scan]["nb_findings"],
-                }
-            }
-        )
-    res.update({"scans": scans})
-
-    if _engine_is_busy() is True:
-        this.scanner["status"] = "BUSY"
-
-    if not os.path.exists(f"{BASE_DIR}/nmap.json"):
-        app.logger.error("nmap.json config file not found")
-        this.scanner["status"] = "ERROR"
-
-    if "path" in this.scanner:
-        if not os.path.isfile(this.scanner["path"]):
-            app.logger.error("NMAP engine not found (%s)", this.scanner["path"])
-            this.scanner["status"] = "ERROR"
-
-    res.update({"status": this.scanner["status"]})
-    return jsonify(res)
-
-
-@app.route("/engines/nmap/info")
-def info():
-    scans = {}
-    for scan in this.scans.keys():
-        scan_status(scan)
-        scans.update(
-            {
-                scan: {
-                    "status": this.scans[scan]["status"],
-                    "options": this.scans[scan]["options"],
-                    "nb_findings": this.scans[scan]["nb_findings"],
-                }
-            }
-        )
-
-    res = {"page": "info", "engine_config": this.scanner, "scans": scans}
     return jsonify(res)
 
 
@@ -861,10 +810,10 @@ def _parse_report(filename, scan_id):
 
                     script_output = ""
 
-                    #Get Result from Port Script. 
+                    # Get Result from Port Script.
                     for port_script in port.findall("script"):
-                        script_output += port_script.get("output")+"\n"
-                    port_data.update({"script_output":script_output})
+                        script_output += port_script.get("output") + "\n"
+                    port_data.update({"script_output": script_output})
                     res.append(
                         deepcopy(
                             _add_issue(
@@ -1091,24 +1040,18 @@ def _get_vulners_findings(findings):
 def getfindings(scan_id):
     """Get findings from engine."""
     res = {"page": "getfindings", "scan_id": scan_id}
-    if not scan_id.isdecimal():
-        res.update({"status": "error", "reason": "scan_id must be numeric digits only"})
-        return jsonify(res)
-    if scan_id not in this.scans.keys():
-        res.update({"status": "error", "reason": f"scan_id '{scan_id}' not found"})
-        return jsonify(res)
+    if scan_id not in engine.scans.keys():
+        raise PatrowlEngineExceptions(1002, "scan_id '{}' not found".format(scan_id))
 
-    proc = this.scans[scan_id]["proc"]
-
-    # check if the scan is finished
-    status()
-    if (
-        hasattr(proc, "pid")
-        and psutil.pid_exists(proc.pid)
-        and psutil.Process(proc.pid).status() in ["sleeping", "running"]
-    ):
-        res.update({"status": "error", "reason": "Scan in progress"})
-        return jsonify(res)
+    # check if the scan is finished (thread as well)
+    status_res = engine.status_scan(scan_id)
+    if engine.scans[scan_id]["status"] != "FINISHED":
+        raise PatrowlEngineExceptions(
+            1003,
+            "scan_id '{}' not finished (status={})".format(
+                scan_id, status_res["status"]
+            ),
+        )
 
     # check if the report is available (exists && scan finished)
     report_filename = f"{BASE_DIR}/results/nmap_{scan_id}.xml"
@@ -1145,64 +1088,17 @@ def getfindings(scan_id):
     if os.path.exists(hosts_filename):
         os.remove(hosts_filename)
 
+    # remove the scan from the active scan list
+    engine.clean_scan(scan_id)
+
     res.update(
         {"scan": scan, "summary": summary, "issues": issues, "status": "success"}
     )
     return jsonify(res)
 
 
-@app.route("/engines/nmap/getreport/<scan_id>")
-def getreport(scan_id):
-    if scan_id not in this.scans.keys():
-        return jsonify({"status": "ERROR", "reason": f"scan_id '{scan_id}' not found"})
-
-    # remove the scan from the active scan list
-    clean_scan(scan_id)
-
-    filepath = f"{BASE_DIR}/results/nmap_{scan_id}.json"
-    if not os.path.exists(filepath):
-        return jsonify(
-            {
-                "status": "ERROR",
-                "reason": f"report file for scan_id '{scan_id}' not found",
-            }
-        )
-
-    return send_from_directory(
-        f"{BASE_DIR}/results",
-        f"nmap_{scan_id}.json",
-        mimetype="application/json",
-        download_name=f"nmap_{scan_id}.json",
-        as_attachment=True,
-    )
-
-
-@app.route("/engines/nmap/test")
-def test():
-    res = "<h2>Test Page (DEBUG):</h2>"
-    for rule in app.url_map.iter_rules():
-        options = {}
-        for arg in rule.arguments:
-            options[arg] = "[{0}]".format(arg)
-
-        methods = ",".join(rule.methods)
-        url = url_for(rule.endpoint, **options)
-        res += urllib.request.url2pathname(
-            "{0:50s} {1:20s} <a href='{2}'>{2}</a><br/>".format(
-                rule.endpoint, methods, url
-            )
-        )
-
-    return res
-
-
-@app.errorhandler(404)
-def page_not_found(e):
-    return jsonify({"page": "not found"})
-
-
-@app.before_first_request
-def main():
+with app.app_context():
+    """First function called."""
     # if os.getuid() != 0: #run with root because of docker env vars scope
     #    app.logger.error("Start the NMAP engine using root privileges !")
     #        sys.exit(-1)
