@@ -162,9 +162,6 @@ def test():
 @app.route("/engines/nmap/status/<scan_id>")
 def status_scan(scan_id):
     """Get status on scan identified by id."""
-    import pdb
-
-    pdb.set_trace()
     return engine.status_scan(scan_id)
 
 
@@ -404,86 +401,59 @@ def _scan_thread(scan_id, thread_id):
     print(
         f"#####   RUNNING 1 scan on thread {thread_id}, for scan {scan_id}, scans length is {len(engine.scans)}   #####"
     )
-    # Define max timeout
-    max_timeout = APP_SCAN_TIMEOUT_DEFAULT
-    timeout = time.time() + max_timeout
+    # # Define max timeout
+    # max_timeout = APP_SCAN_TIMEOUT_DEFAULT
+    # timeout = time.time() + max_timeout
 
     # while time.time() < timeout:
-    #     if hasattr(proc, 'pid') and psutil.pid_exists(proc.pid) and psutil.Process(proc.pid).status() in ["sleeping", "running"]:
+    #     if (
+    #         hasattr(proc, "pid")
+    #         and psutil.pid_exists(proc.pid)
+    #         and psutil.Process(proc.pid).status() in ["sleeping", "running"]
+    #     ):
     #         # Scan is still in progress
     #         time.sleep(3)
     #         # print(f'scan {scan_id} still running...')
     #     else:
     #         # Scan is finished
     #         # print(f'scan {scan_id} is finished !')
-
-    #         # Check if the report is available (exists && scan finished)
-    #         report_filename = f"{BASE_DIR}/results/nmap_{scan_id}.xml"
-    #         if not os.path.exists(report_filename):
-    #             return False
-
-    #         issues, summary, raw_hosts = _parse_report(report_filename, scan_id)
-
-    #         # Check if banner grabbing is requested
-    #         if "banner" in options.keys() and options["banner"] in [True, 1, "true", "1", "y", "yes", "on"]:
-    #             extra_issues = get_service_banner(scan_id, raw_hosts)
-    #             issues.extend(extra_issues)
-
-    #         engine.scans[scan_id]["issues"] = deepcopy(issues)
-    #         engine.scans[scan_id]["issues_available"] = True
-    #         engine.scans[scan_id]["status"] = "FINISHED"
     #         break
 
-    # return True
-    while time.time() < timeout:
-        if (
-            hasattr(proc, "pid")
-            and psutil.pid_exists(proc.pid)
-            and psutil.Process(proc.pid).status() in ["sleeping", "running"]
-        ):
-            # Scan is still in progress
-            time.sleep(3)
-            # print(f'scan {scan_id} still running...')
-        else:
-            # Scan is finished
-            # print(f'scan {scan_id} is finished !')
-            break
+    # time.sleep(1)  # wait for creating report file (could be long)
 
-    time.sleep(1)  # wait for creating report file (could be long)
+    # # Check if the report is available (exists && scan finished)
+    # report_filename = f"{BASE_DIR}/results/nmap_{scan_id}.xml"
+    # if not os.path.exists(report_filename):
+    #     # engine.scans[scan_id]["status"] = "FINISHED"  # ERROR ?
+    #     # engine.scans[scan_id]["issues_available"] = True
+    #     engine.scans[scan_id]["status"] = "ERROR"
+    #     engine.scans[scan_id]["issues_available"] = False
+    #     return False
 
-    # Check if the report is available (exists && scan finished)
-    report_filename = f"{BASE_DIR}/results/nmap_{scan_id}.xml"
-    if not os.path.exists(report_filename):
-        # engine.scans[scan_id]["status"] = "FINISHED"  # ERROR ?
-        # engine.scans[scan_id]["issues_available"] = True
-        engine.scans[scan_id]["status"] = "ERROR"
-        engine.scans[scan_id]["issues_available"] = False
-        return False
+    # try:
+    #     issues, summary, raw_hosts = _parse_report(report_filename, scan_id)
 
-    try:
-        issues, summary, raw_hosts = _parse_report(report_filename, scan_id)
+    #     # Check if banner grabbing is requested
+    #     if "banner" in options.keys() and options["banner"] in [
+    #         True,
+    #         1,
+    #         "true",
+    #         "1",
+    #         "y",
+    #         "yes",
+    #         "on",
+    #     ]:
+    #         extra_issues = get_service_banner(scan_id, raw_hosts)
+    #         issues.extend(extra_issues)
 
-        # Check if banner grabbing is requested
-        if "banner" in options.keys() and options["banner"] in [
-            True,
-            1,
-            "true",
-            "1",
-            "y",
-            "yes",
-            "on",
-        ]:
-            extra_issues = get_service_banner(scan_id, raw_hosts)
-            issues.extend(extra_issues)
-
-        engine.scans[scan_id]["issues"] = deepcopy(issues)
-    except Exception as e:
-        app.logger.info(e)
-        # traceback.print_exception(*sys.exc_info())
-        engine.scans[scan_id]["status"] = "ERROR"
-        engine.scans[scan_id]["issues_available"] = False
-    engine.scans[scan_id]["issues_available"] = True
-    engine.scans[scan_id]["status"] = "FINISHED"
+    #     engine.scans[scan_id]["issues"] = deepcopy(issues)
+    # except Exception as e:
+    #     app.logger.info(e)
+    #     # traceback.print_exception(*sys.exc_info())
+    #     engine.scans[scan_id]["status"] = "ERROR"
+    #     engine.scans[scan_id]["issues_available"] = False
+    # engine.scans[scan_id]["issues_available"] = True
+    # engine.scans[scan_id]["status"] = "FINISHED"
 
     return True
 
@@ -1022,18 +992,31 @@ def getfindings(scan_id):
             ),
         )
 
+    issues = []
+    summary = {}
+    scan = {"scan_id": scan_id}
+
     # check if the report is available (exists && scan finished)
     report_filename = f"{BASE_DIR}/results/nmap_{scan_id}.xml"
     if not os.path.exists(report_filename):
         res.update({"status": "error", "reason": "Report file not available"})
         return jsonify(res)
 
-    if "issues" not in engine.scans[scan_id].keys():
-        res.update({"status": "error", "reason": "Issues not available yet"})
-        return jsonify(res)
+    issues, _, raw_hosts = _parse_report(report_filename, scan_id)
 
-    issues = engine.scans[scan_id]["issues"]
-    scan = {"scan_id": scan_id}
+    # Check if banner grabbing is requested
+    options = engine.scans[scan_id]["options"]
+    if "banner" in options and options["banner"] in [
+        True,
+        1,
+        "true",
+        "1",
+        "y",
+        "yes",
+        "on",
+    ]:
+        extra_issues = get_service_banner(scan_id, raw_hosts)
+        issues.extend(extra_issues)
 
     nb_vulns = {"info": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
     for issue in issues:
@@ -1066,9 +1049,7 @@ def getfindings(scan_id):
     # remove the scan from the active scan list
     engine.clean_scan(scan_id)
 
-    res.update(
-        {"scan": scan, "summary": summary, "issues": issues, "status": "success"}
-    )
+    res.update({"summary": summary, "issues": issues, "status": "success"})
     return jsonify(res)
 
 
