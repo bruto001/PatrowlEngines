@@ -33,6 +33,7 @@ APP_MAXSCANS = int(os.environ.get("APP_MAXSCANS", 5))
 
 APP_HOST = "0.0.0.0"
 APP_PORT = 5001
+APP_ENGINE_NAME = "nmap"
 APP_SCAN_TIMEOUT_DEFAULT = int(os.environ.get("APP_SCAN_TIMEOUT_DEFAULT", 7200))
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -111,22 +112,22 @@ def loadconfig():
     conf_file = f"{BASE_DIR}/nmap.json"
     if os.path.exists(conf_file):
         json_data = open(conf_file)
-        this.scanner = json.load(json_data)
+        engine.scanner = json.load(json_data)
     else:
-        this.scanner["status"] = "ERROR"
+        engine.scanner["status"] = "ERROR"
         return {"status": "ERROR", "reason": "config file not found."}
 
-    if not os.path.isfile(this.scanner["path"]):
-        this.scanner["status"] = "ERROR"
+    if not os.path.isfile(engine.scanner["path"]):
+        engine.scanner["status"] = "ERROR"
         return {"status": "ERROR", "reason": "path to nmap binary not found."}
 
     version_filename = f"{BASE_DIR}/VERSION"
     if os.path.exists(version_filename):
         version_file = open(version_filename, "r")
-        this.scanner["version"] = version_file.read().rstrip("\n")
+        engine.scanner["version"] = version_file.read().rstrip("\n")
         version_file.close()
 
-    this.scanner["status"] = "READY"
+    engine.scanner["status"] = "READY"
     res.update(
         {
             "status": "success",
@@ -142,7 +143,7 @@ def reloadconfig():
     """Reload configuration route."""
     res = {"page": "reloadconfig"}
     loadconfig()
-    res.update({"config": this.scanner})
+    res.update({"config": engine.scanner})
     return jsonify(res)
 
 
@@ -161,6 +162,9 @@ def test():
 @app.route("/engines/nmap/status/<scan_id>")
 def status_scan(scan_id):
     """Get status on scan identified by id."""
+    import pdb
+
+    pdb.set_trace()
     return engine.status_scan(scan_id)
 
 
@@ -195,13 +199,13 @@ def start():
     # update scanner status
     status()
 
-    if this.scanner["status"] != "READY":
+    if engine.scanner["status"] != "READY":
         res.update(
             {
                 "status": "refused",
                 "details": {
                     "reason": "scanner not ready",
-                    "status": this.scanner["status"],
+                    "status": engine.scanner["status"],
                 },
             }
         )
@@ -219,7 +223,7 @@ def start():
         return jsonify(res), 500
 
     scan_id = str(data["scan_id"])
-    if data["scan_id"] in this.scans.keys():
+    if data["scan_id"] in engine.scans.keys():
         res.update(
             {
                 "status": "refused",
@@ -245,7 +249,7 @@ def start():
         "started_at": int(time.time() * 1000),
         "nb_findings": 0,
     }
-    this.scans.update({scan_id: scan})
+    engine.scans.update({scan_id: scan})
 
     app.logger.debug("Launching thread for asset list")
     th = threading.Thread(
@@ -253,7 +257,7 @@ def start():
         kwargs={"scan_id": scan_id, "thread_id": 0},
     )
     th.start()
-    # this.scans[scan_id]["threads"].append(th)
+    # engine.scans[scan_id]["threads"].append(th)
 
     res.update({"status": "accepted", "details": {"scan_id": scan["scan_id"]}})
     return jsonify(res)
@@ -262,8 +266,8 @@ def start():
 def _scan_thread(scan_id, thread_id):
     hosts = []
 
-    for asset in this.scans[scan_id]["assets"]:
-        if asset["datatype"] not in this.scanner["allowed_asset_types"]:
+    for asset in engine.scans[scan_id]["assets"]:
+        if asset["datatype"] not in engine.scanner["allowed_asset_types"]:
             return jsonify(
                 {
                     "status": "refused",
@@ -292,23 +296,23 @@ def _scan_thread(scan_id, thread_id):
             app.logger.debug("asset: %s", item)
 
     # Sanitize args :
-    options = this.scans[scan_id]["options"]
+    options = engine.scans[scan_id]["options"]
 
     ports = None
     if "ports" in options:
         ports = ",".join(options["ports"])
-    # del this.scans[scan_id]['options']['ports']
+    # del engine.scans[scan_id]['options']['ports']
 
     app.logger.debug("options: %s", options)
 
     log_path = f"{BASE_DIR}/logs/{scan_id}.error"
 
-    cmd = f"{this.scanner['path']} -vvv -oX {BASE_DIR}/results/nmap_{scan_id}.xml"
+    cmd = f"{engine.scanner['path']} -vvv -oX {BASE_DIR}/results/nmap_{scan_id}.xml"
 
     # Check options
     for opt_key in options.keys():
         if (
-            opt_key in this.scanner["options"]
+            opt_key in engine.scanner["options"]
             and options.get(opt_key)
             and opt_key
             not in [
@@ -320,7 +324,7 @@ def _scan_thread(scan_id, thread_id):
                 "host_file_path",
             ]
         ):
-            cmd += " {}".format(this.scanner["options"][opt_key]["value"])
+            cmd += " {}".format(engine.scanner["options"][opt_key]["value"])
         if (
             opt_key == "ports" and ports is not None
         ):  # /!\ @todo / Security issue: Sanitize parameters here
@@ -372,19 +376,34 @@ def _scan_thread(scan_id, thread_id):
 
     cmd_sec = split(cmd)
 
-    this.scans[scan_id]["proc_cmd"] = "not set!!"
+    engine.scans[scan_id]["proc_cmd"] = "not set!!"
     with open(log_path, "w"):
-        this.scans[scan_id]["proc"] = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd_sec,
             shell=False,
             # stdout=open("/dev/null", "w"), stderr=stderr
             stdout=open("/dev/null", "w"),
             stderr=open("/dev/null", "w"),
         )
-    this.scans[scan_id]["proc_cmd"] = cmd
+        engine.scans[scan_id]["proc"] = proc
+        thread_info = {
+            "thread_id": thread_id,
+            "proc": proc,
+            "cmd": cmd,
+            "thread": threading.current_thread(),
+            "status": "RUNNING",
+            "asset": engine.scans[scan_id]["assets"],
+        }
+        engine.scans[scan_id]["threads"].update({thread_id: thread_info})
+        engine.scans[scan_id]["status"] = "SCANNING"
+        engine.scans[scan_id]["proc_cmd"] = cmd
 
-    proc = this.scans[scan_id]["proc"]
-
+    app.logger.debug(
+        f"#####   RUNNING 1 scan on thread {thread_id}, for scan {scan_id}, scans length is {len(engine.scans)}   #####"
+    )
+    print(
+        f"#####   RUNNING 1 scan on thread {thread_id}, for scan {scan_id}, scans length is {len(engine.scans)}   #####"
+    )
     # Define max timeout
     max_timeout = APP_SCAN_TIMEOUT_DEFAULT
     timeout = time.time() + max_timeout
@@ -403,16 +422,16 @@ def _scan_thread(scan_id, thread_id):
     #         if not os.path.exists(report_filename):
     #             return False
 
-    #         issues, raw_hosts = _parse_report(report_filename, scan_id)
+    #         issues, summary, raw_hosts = _parse_report(report_filename, scan_id)
 
     #         # Check if banner grabbing is requested
     #         if "banner" in options.keys() and options["banner"] in [True, 1, "true", "1", "y", "yes", "on"]:
     #             extra_issues = get_service_banner(scan_id, raw_hosts)
     #             issues.extend(extra_issues)
 
-    #         this.scans[scan_id]["issues"] = deepcopy(issues)
-    #         this.scans[scan_id]["issues_available"] = True
-    #         this.scans[scan_id]["status"] = "FINISHED"
+    #         engine.scans[scan_id]["issues"] = deepcopy(issues)
+    #         engine.scans[scan_id]["issues_available"] = True
+    #         engine.scans[scan_id]["status"] = "FINISHED"
     #         break
 
     # return True
@@ -435,14 +454,14 @@ def _scan_thread(scan_id, thread_id):
     # Check if the report is available (exists && scan finished)
     report_filename = f"{BASE_DIR}/results/nmap_{scan_id}.xml"
     if not os.path.exists(report_filename):
-        # this.scans[scan_id]["status"] = "FINISHED"  # ERROR ?
-        # this.scans[scan_id]["issues_available"] = True
-        this.scans[scan_id]["status"] = "ERROR"
-        this.scans[scan_id]["issues_available"] = False
+        # engine.scans[scan_id]["status"] = "FINISHED"  # ERROR ?
+        # engine.scans[scan_id]["issues_available"] = True
+        engine.scans[scan_id]["status"] = "ERROR"
+        engine.scans[scan_id]["issues_available"] = False
         return False
 
     try:
-        issues, raw_hosts = _parse_report(report_filename, scan_id)
+        issues, summary, raw_hosts = _parse_report(report_filename, scan_id)
 
         # Check if banner grabbing is requested
         if "banner" in options.keys() and options["banner"] in [
@@ -457,34 +476,34 @@ def _scan_thread(scan_id, thread_id):
             extra_issues = get_service_banner(scan_id, raw_hosts)
             issues.extend(extra_issues)
 
-        this.scans[scan_id]["issues"] = deepcopy(issues)
+        engine.scans[scan_id]["issues"] = deepcopy(issues)
     except Exception as e:
         app.logger.info(e)
         # traceback.print_exception(*sys.exc_info())
-        this.scans[scan_id]["status"] = "ERROR"
-        this.scans[scan_id]["issues_available"] = False
-    this.scans[scan_id]["issues_available"] = True
-    this.scans[scan_id]["status"] = "FINISHED"
+        engine.scans[scan_id]["status"] = "ERROR"
+        engine.scans[scan_id]["issues_available"] = False
+    engine.scans[scan_id]["issues_available"] = True
+    engine.scans[scan_id]["status"] = "FINISHED"
 
     return True
 
 
-@app.route("/engines/nmap/status/<scan_id>")
-def scan_status(scan_id):
+# @app.route("/engines/nmap/status/<scan_id>")
+def _scan_status(scan_id):
     res = {"page": "status", "status": "SCANNING"}
-    if scan_id not in this.scans.keys():
+    if scan_id not in engine.scans.keys():
         res.update({"status": "error", "reason": f"scan_id '{scan_id}' not found"})
         return jsonify(res), 404
 
-    if this.scans[scan_id]["status"] == "ERROR":
+    if engine.scans[scan_id]["status"] == "ERROR":
         res.update({"status": "error", "reason": "todo"})
         return jsonify(res), 503
 
     # Fix when a scan is started but the thread has not been created yet
-    if this.scans[scan_id]["status"] == "STARTED":
+    if engine.scans[scan_id]["status"] == "STARTED":
         res.update({"status": "SCANNING"})
 
-    proc = this.scans[scan_id]["proc"]
+    proc = engine.scans[scan_id]["proc"]
     if not hasattr(proc, "pid"):
         res.update({"status": "ERROR", "reason": "No PID found"})
         return jsonify(res), 503
@@ -492,16 +511,16 @@ def scan_status(scan_id):
     # if not psutil.pid_exists(proc.pid):
     if (
         not psutil.pid_exists(proc.pid)
-        and this.scans[scan_id]["issues_available"] is True
+        and engine.scans[scan_id]["issues_available"] is True
     ):
         res.update({"status": "FINISHED"})
-        this.scans[scan_id]["status"] = "FINISHED"
+        engine.scans[scan_id]["status"] = "FINISHED"
         # print(f"scan_status/scan '{scan_id}' is finished")
 
     elif (
         not psutil.pid_exists(proc.pid)
-        and this.scans[scan_id]["issues_available"] is False
-        and this.scans[scan_id]["status"] == "ERROR"
+        and engine.scans[scan_id]["issues_available"] is False
+        and engine.scans[scan_id]["status"] == "ERROR"
     ):
         res.update({"status": "ERROR"})
         # print(f"scan_status/scan '{scan_id}' is finished")
@@ -513,20 +532,20 @@ def scan_status(scan_id):
         res.update(
             {
                 "status": "SCANNING",
-                "info": {"pid": proc.pid, "cmd": this.scans[scan_id]["proc_cmd"]},
+                "info": {"pid": proc.pid, "cmd": engine.scans[scan_id]["proc_cmd"]},
             }
         )
         # print(f"scan_status/scan '{scan_id}' is still SCANNING")
     elif (
         psutil.pid_exists(proc.pid)
         and psutil.Process(proc.pid).status() == "zombie"
-        and this.scans[scan_id]["issues_available"] is True
+        and engine.scans[scan_id]["issues_available"] is True
     ):
         res.update({"status": "FINISHED"})
-        this.scans[scan_id]["status"] = "FINISHED"
+        engine.scans[scan_id]["status"] = "FINISHED"
         psutil.Process(proc.pid).terminate()
 
-    # print(scan_id, res['status'], psutil.pid_exists(proc.pid), hasattr(proc, "pid"), this.scans[scan_id]["issues_available"], psutil.Process(proc.pid).status())
+    # print(scan_id, res['status'], psutil.pid_exists(proc.pid), hasattr(proc, "pid"), engine.scans[scan_id]["issues_available"], psutil.Process(proc.pid).status())
     return jsonify(res)
 
 
@@ -580,9 +599,9 @@ def _add_issue(
     risk={},
     raw=[],
 ):
-    this.scans[scan_id]["nb_findings"] = this.scans[scan_id]["nb_findings"] + 1
+    engine.scans[scan_id]["nb_findings"] = engine.scans[scan_id]["nb_findings"] + 1
     issue = {
-        "issue_id": this.scans[scan_id]["nb_findings"],
+        "issue_id": engine.scans[scan_id]["nb_findings"],
         "severity": severity,
         "confidence": confidence,
         "target": target,
@@ -605,14 +624,16 @@ def _add_issue(
 
 def _parse_report(filename, scan_id):
     """Parse the nmap report."""
-    res = []
+    issues = []
     target = {}
     raw_hosts = {}
+    nb_vulns = {"info": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
+
     try:
         tree = ET.parse(filename)
     except Exception:
         # No Element found in XML file
-        return res, raw_hosts
+        return issues, raw_hosts
 
     if tree.find("taskbegin") is not None:
         ts = tree.find("taskbegin").get("time")
@@ -620,11 +641,11 @@ def _parse_report(filename, scan_id):
         ts = tree.getroot().get("start")
 
     unresolved_domains = set()
-    for a in this.scans[scan_id]["assets"]:
+    for a in engine.scans[scan_id]["assets"]:
         if a["datatype"] == "domain":
             unresolved_domains.add(a["value"])
     down_ips = set()
-    for a in this.scans[scan_id]["assets"]:
+    for a in engine.scans[scan_id]["assets"]:
         if a["datatype"] == "ip":
             down_ips.add(a["value"])
 
@@ -647,7 +668,7 @@ def _parse_report(filename, scan_id):
             addr_list.append(addr)
 
         # Check if it was extracted from URLs. If yes: add them
-        for a in this.scans[scan_id]["assets"]:
+        for a in engine.scans[scan_id]["assets"]:
             if a["datatype"] == "url" and urlparse(a["value"]).netloc in addr_list:
                 addr_list.append(a["value"])
 
@@ -661,7 +682,7 @@ def _parse_report(filename, scan_id):
             for hostnames in host.findall("hostnames"):
                 for hostname in list(hostnames):
                     ip_address = str(host.find("address").get("addr"))
-                    res.append(
+                    issues.append(
                         deepcopy(
                             _add_issue(
                                 scan_id,
@@ -705,7 +726,7 @@ def _parse_report(filename, scan_id):
                     os_cpe = osclass.find("cpe")
                     if os_cpe is not None:
                         os_data["cpe"].append(os_cpe.text)
-                res.append(
+                issues.append(
                     deepcopy(
                         _add_issue(
                             scan_id,
@@ -814,7 +835,7 @@ def _parse_report(filename, scan_id):
                     for port_script in port.findall("script"):
                         script_output += port_script.get("output") + "\n"
                     port_data.update({"script_output": script_output})
-                    res.append(
+                    issues.append(
                         deepcopy(
                             _add_issue(
                                 scan_id,
@@ -836,7 +857,7 @@ def _parse_report(filename, scan_id):
 
                 if port_state not in ["filtered", "closed"]:
                     openports = True
-                    res.append(
+                    issues.append(
                         deepcopy(
                             _add_issue(
                                 scan_id,
@@ -854,10 +875,10 @@ def _parse_report(filename, scan_id):
 
             if (
                 not openports
-                and "ports" in this.scans[scan_id]["options"].keys()
-                and this.scans[scan_id]["options"]["ports"][0] in ["-", "1-65535"]
+                and "ports" in engine.scans[scan_id]["options"].keys()
+                and engine.scans[scan_id]["options"]["ports"][0] in ["-", "1-65535"]
             ):  # only if all ports were scanned you can add the finding
-                res.append(
+                issues.append(
                     deepcopy(
                         _add_issue(
                             scan_id,
@@ -873,7 +894,7 @@ def _parse_report(filename, scan_id):
         # get host status
         status = host.find("status").get("state")
         if openports:  # There are open ports so it must be up
-            res.append(
+            issues.append(
                 deepcopy(
                     _add_issue(
                         scan_id,
@@ -885,12 +906,12 @@ def _parse_report(filename, scan_id):
                     )
                 )
             )
-        # elif status and status == "up" and "no_ping" in this.scans[scan_id]["options"].keys() and this.scans[scan_id]["options"]["no_ping"] == '0': #if no_ping (-Pn) is used all hosts are always up even if they are not
+        # elif status and status == "up" and "no_ping" in engine.scans[scan_id]["options"].keys() and engine.scans[scan_id]["options"]["no_ping"] == '0': #if no_ping (-Pn) is used all hosts are always up even if they are not
         elif (
             status and status == "up"
         ):  # if no_ping (-Pn) is used all hosts are always up even if they are not
-            # if "no_ping" in this.scans[scan_id]["options"].keys() and this.scans[scan_id]["options"]["no_ping"] == '0':
-            res.append(
+            # if "no_ping" in engine.scans[scan_id]["options"].keys() and engine.scans[scan_id]["options"]["no_ping"] == '0':
+            issues.append(
                 deepcopy(
                     _add_issue(
                         scan_id,
@@ -903,7 +924,7 @@ def _parse_report(filename, scan_id):
                 )
             )
         if status and status == "down":
-            res.append(
+            issues.append(
                 deepcopy(
                     _add_issue(
                         scan_id,
@@ -925,7 +946,7 @@ def _parse_report(filename, scan_id):
         if host.find("hostscript") is not None:
             for script in host.find("hostscript"):
                 script_output = script.get("output")
-                res.append(
+                issues.append(
                     deepcopy(
                         _add_issue(
                             scan_id,
@@ -940,13 +961,13 @@ def _parse_report(filename, scan_id):
                     )
                 )
 
-                if "script_output_fields" in this.scans[scan_id]["options"].keys():
+                if "script_output_fields" in engine.scans[scan_id]["options"].keys():
                     for elem in script.findall("elem"):
                         if (
                             elem.get("key")
-                            in this.scans[scan_id]["options"]["script_output_fields"]
+                            in engine.scans[scan_id]["options"]["script_output_fields"]
                         ):
-                            res.append(
+                            issues.append(
                                 deepcopy(
                                     _add_issue(
                                         scan_id,
@@ -968,7 +989,7 @@ def _parse_report(filename, scan_id):
             "addr": [unresolved_domain],
             "addr_type": "tcp",
         }
-        res.append(
+        issues.append(
             deepcopy(
                 _add_issue(
                     scan_id,
@@ -984,18 +1005,18 @@ def _parse_report(filename, scan_id):
             )
         )
     if (
-        "ports" in this.scans[scan_id]["options"].keys()
-        and this.scans[scan_id]["options"]["ports"][0] in ["-", "1-65535"]
+        "ports" in engine.scans[scan_id]["options"].keys()
+        and engine.scans[scan_id]["options"]["ports"][0] in ["-", "1-65535"]
     ) or (
-        "fast_scan" in this.scans[scan_id]["options"].keys()
-        and this.scans[scan_id]["options"]["fast_scan"]
+        "fast_scan" in engine.scans[scan_id]["options"].keys()
+        and engine.scans[scan_id]["options"]["fast_scan"]
     ):
         for down_ip in down_ips:
             target = {
                 "addr": [down_ip],
                 "addr_type": "tcp",
             }
-            res.append(
+            issues.append(
                 deepcopy(
                     _add_issue(
                         scan_id,
@@ -1009,7 +1030,16 @@ def _parse_report(filename, scan_id):
                 )
             )
 
-    return res, raw_hosts
+    summary = {
+        "nb_issues": len(issues),
+        "nb_info": 0,
+        "nb_low": 0,
+        "nb_medium": 0,
+        "nb_high": 0,
+        "nb_critical": 0,
+        "engine_name": "nmap",
+    }
+    return issues, summary, raw_hosts
 
 
 def _get_cpe_link(cpe):
@@ -1059,20 +1089,26 @@ def getfindings(scan_id):
         res.update({"status": "error", "reason": "Report file not available"})
         return jsonify(res)
 
-    if "issues" not in this.scans[scan_id].keys():
+    if "issues" not in engine.scans[scan_id].keys():
         res.update({"status": "error", "reason": "Issues not available yet"})
         return jsonify(res)
 
-    issues = this.scans[scan_id]["issues"]
+    issues = engine.scans[scan_id]["issues"]
     scan = {"scan_id": scan_id}
+
+    nb_vulns = {"info": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
+    for issue in issues:
+        nb_vulns[issue["severity"]] += 1
+
     summary = {
         "nb_issues": len(issues),
-        "nb_info": len(issues),
-        "nb_low": 0,
-        "nb_medium": 0,
-        "nb_high": 0,
+        "nb_info": nb_vulns["info"],
+        "nb_low": nb_vulns["low"],
+        "nb_medium": nb_vulns["medium"],
+        "nb_high": nb_vulns["high"],
+        "nb_critical": nb_vulns["critical"],
         "engine_name": "nmap",
-        "engine_version": this.scanner["version"],
+        "engine_version": engine.scanner["version"],
     }
 
     # Store the findings in a file
