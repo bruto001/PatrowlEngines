@@ -488,67 +488,6 @@ def _scan_thread(scan_id, thread_id):
     return True
 
 
-# @app.route("/engines/nmap/status/<scan_id>")
-def _scan_status(scan_id):
-    res = {"page": "status", "status": "SCANNING"}
-    if scan_id not in engine.scans.keys():
-        res.update({"status": "error", "reason": f"scan_id '{scan_id}' not found"})
-        return jsonify(res), 404
-
-    if engine.scans[scan_id]["status"] == "ERROR":
-        res.update({"status": "error", "reason": "todo"})
-        return jsonify(res), 503
-
-    # Fix when a scan is started but the thread has not been created yet
-    if engine.scans[scan_id]["status"] == "STARTED":
-        res.update({"status": "SCANNING"})
-
-    proc = engine.scans[scan_id]["proc"]
-    if not hasattr(proc, "pid"):
-        res.update({"status": "ERROR", "reason": "No PID found"})
-        return jsonify(res), 503
-
-    # if not psutil.pid_exists(proc.pid):
-    if (
-        not psutil.pid_exists(proc.pid)
-        and engine.scans[scan_id]["issues_available"] is True
-    ):
-        res.update({"status": "FINISHED"})
-        engine.scans[scan_id]["status"] = "FINISHED"
-        # print(f"scan_status/scan '{scan_id}' is finished")
-
-    elif (
-        not psutil.pid_exists(proc.pid)
-        and engine.scans[scan_id]["issues_available"] is False
-        and engine.scans[scan_id]["status"] == "ERROR"
-    ):
-        res.update({"status": "ERROR"})
-        # print(f"scan_status/scan '{scan_id}' is finished")
-
-    elif psutil.pid_exists(proc.pid) and psutil.Process(proc.pid).status() in [
-        "sleeping",
-        "running",
-    ]:
-        res.update(
-            {
-                "status": "SCANNING",
-                "info": {"pid": proc.pid, "cmd": engine.scans[scan_id]["proc_cmd"]},
-            }
-        )
-        # print(f"scan_status/scan '{scan_id}' is still SCANNING")
-    elif (
-        psutil.pid_exists(proc.pid)
-        and psutil.Process(proc.pid).status() == "zombie"
-        and engine.scans[scan_id]["issues_available"] is True
-    ):
-        res.update({"status": "FINISHED"})
-        engine.scans[scan_id]["status"] = "FINISHED"
-        psutil.Process(proc.pid).terminate()
-
-    # print(scan_id, res['status'], psutil.pid_exists(proc.pid), hasattr(proc, "pid"), engine.scans[scan_id]["issues_available"], psutil.Process(proc.pid).status())
-    return jsonify(res)
-
-
 def get_service_banner(scan_id, raw_hosts):
     ts = int(time.time() * 1000)
     res = []
