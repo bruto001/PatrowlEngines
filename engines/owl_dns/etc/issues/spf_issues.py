@@ -1,100 +1,97 @@
-spf_issues = {
-    "deprecated_spf_record": {"title": "Deprecated SPF record"},
-    "invalid_spf_record": {"title": "Invalid SPF record"},
-    "over_lookup": {},
-}
-
-# Require the SPF record in the DNS so that it can validate it.
-# SPF records must be published as a DNS TXT (type 16) Resource Record (RR) [RFC1035]. See RFC7208 for further detail.
+# fmt: off
 NO_SPF_RECORD = {
     "severity": "low",
     "confidence": "certain",
     "title": "No SPF record",
-    "description": "",
-    "solution": "",
+    "description": "An SPF (Sender Policy Framework) record defines the mail servers and domains that are allowed to "
+                   "send email on behalf of your domain. It also tells receiving servers what to do with messages "
+                   "after they're checked.",
+    "solution": "List which servers are allowed to send email on behalf of your domain, and add an SPF record on that "
+                "domain. If your domain doesn't send mail, this SPF record must be added: v=spf1 -all",
 }
 
-# Check for multiple SPF records. It is not permitted to publish multiple SPF records.
-# RFC 7208, Section 3.3:
+# RFC 7208, Section 3.2
 MULTIPLE_SPF_RECORDS = {
     "severity": "low",
     "confidence": "certain",
     "title": "Multiple SPF records",
     "description": "A domain name must not have multiple records that would cause an authorization check to select "
-    "more than one record.",
-    "solution": "",
+                   "more than one record (see RFC 7208, Section 3.2).",
+    "solution": "Keep only one SPF record and delete the others: you should always update your SPF record, rather than"
+                "creating a new record in addition to the existing one.",
 }
 
-# Check the SPF string length. It has a 255-character string limit.
+# RFC 7208, Section 3.3
 STRING_TOO_LONG = {
     "severity": "low",
     "confidence": "certain",
-    "title": "Character-string too long",
-    "description": "",
-    "solution": "",
+    "title": "String longer than 255 characters",
+    "description": "A TXT record string cannot be longer than 255 characters (see RFC 7208, Section 3.3).",
+    "solution": "A single TXT record can be composed of more than one string, which are useful in constructing "
+                "records that would exceed the 255-octet maximum length of a character-string within a single TXT "
+                "record.",
 }
 
-#  	Number of void lookups is OK.
-# The void lookup limit was introduced in RFC 7208 and refers to DNS lookups which either return an empty response (NOERROR with no answers) or an NXDOMAIN response. This is a separate count from the 10 DNS lookup overall count.
-#
-# As described at the end of Section 11.1, there may be cases where it is useful to limit the number of "terms" for which DNS queries return either a positive answer (RCODE 0) with an answer count of 0, or a "Name Error" (RCODE 3) answer. These are sometimes collectively referred to as "void lookups". SPF implementations SHOULD limit "void lookups" to two. An implementation MAY choose to make such a limit configurable. In this case, a default of two is RECOMMENDED. Exceeding the limit produces a "permerror" result.
-#
-# This is meant to help prevent erroneous or malicious SPF records from contributing to a DNS-based denial of service attack.
-#  	Number of lookups is OK. (10)
-# When using SPF, it's only possible to perform 10 (nested) DNS lookups.
+# RFC 7208, Section 4.6.4
+DNS_LOOKUP_LIMIT = {
+    "severity": "low",
+    "confidence": "certain",
+    "title": "High number of DNS lookup",
+    "description": "The following terms cause DNS queries: the INCLUDE, A, MX, PTR, and EXISTS mechanisms, "
+                   "and the REDIRECTS modifier. SPF implementations limits the total number of those terms to 10 "
+                   "during SPF evaluation, to avoid unreasonable load on the DNS.",
+    "solution": "Review and adjust if necessary."
+}
 
+# TODO: RFC 7208, Section 4.6.4
+#  In addition for MX mechanism, the evaluation of each "MX" record MUST NOT result in querying more than 10 address
+#  records -- either "A" or "AAAA" resource records.
 
-# 	Too Many MX Resource Records
+# TODO: RFC 7208, Section 4.6.4
+#  In addition for PTR mechanism, the evaluation of each "PTR" record MUST NOT result in querying more than 10 address
+#  records -- either "A" or "AAAA" resource records.
 
-# Check whether the PTR mechanism is used. It's not advised to use PTR as this is a deprecated one, and several senders may ignore the SPF record when this method is used.
-# RFC 7208, Section 5.5: PTR mechanism SHOULD NOT be published. This mechanism is slow, it is not as reliable as other
-#    mechanisms in cases of DNS errors, and it places a large burden on
-#    the .arpa name servers.  If used, proper PTR records have to be in
-#    place for the domain's hosts and the "ptr" mechanism SHOULD be one of
-#    the last mechanisms checked.  After many years of SPF deployment
-#    experience, it has been concluded that it is unnecessary and more
-#    reliable alternatives should be used instead.  It is, however, still
-#    in use as part of the SPF protocol, so compliant check_host()
-#    implementations MUST support it.
-# Your domain's SPF record includes a sender mechanism type of PTR. The use of this mechanism is heavily discouraged per RFC4408 as it is slow and unreliable. Per email delivery best practices, it is advisable to avoid including PTR type mechanisms in your SPF record.
-#
-# RFC 4408 states:
-# "Use of this mechanism is discouraged because it is slow, it is not as reliable as other mechanisms in cases of DNS errors, and it places a large burden on the arpa name servers. If used, proper PTR records must be in place for the domain's hosts and the "ptr" mechanism should be one of the last mechanisms checked."
+# TODO: RFC 7208, Section 4.6.4
+#  SPF implementations SHOULD limit "void lookups" to two (DNS queries return either a positive answer (RCODE 0) with an
+#  answer count of 0, or a "Name Error" (RCODE) answer.
+
+# RFC 7208, Section 5.1
+DIRECTIVES_AFTER_ALL = {
+    "severity": "low",
+    "confidence": "certain",
+    "title": "Directives after ALL not allowed",
+    "description": "Mechanisms after ALL will never be tested and are ignored by mail servers (see RFC 7208, "
+                   "Section 5.1).",
+    "solution": "Be sure to insert all desired tags before the ~all stipulation or the ensuing text will be "
+                "disregarded.",
+}
+
+# RFC 7208, Section 5.5
 PRESENCE_OF_PTR = {
     "severity": "low",
     "confidence": "certain",
-    "title": 'Mechanism "ptr" not recommended',
-    "description": "",
-    "solution": "",
+    "title": "Mechanism PTR not recommended",
+    "description": "Use of PTR is discourage, because it is slow and not as reliable as other mechanisms in cases "
+                   "of DNS errors, and it places a large burden on the .arpa name servers (see RFC 7208, "
+                   "Section 5.5). Besides, several senders may ignore the SPF record when this mechanism is used.",
+    "solution": "Alternatives mechanisms should be used instead. If used, proper PTR records have to be in place for "
+                "the domain's hosts and the PTR mechanism should be one of the last mechanisms checked.",
 }
 
-# The record is valid.
-# No deprecated records found.
-# The domain has published the SPF record in a DNS type "SPF".
-#  The use of alternative DNS RR types that was formerly supported during the experimental phase of SPF was discontinued in 2014. SPF records must now only be published as a DNS TXT (type 16) Resource Record (RR) [RFC1035]. See RFC 7208 for further detail on this change.
+# RFC 7208, Section 14.1
 DEPRECATED_SPF_RECORD = {
     "severity": "low",
     "confidence": "certain",
     "title": "Deprecated SPF record",
-    "description": "",
-    "solution": "",
+    "description": "SPF (Sender Policy Framework) records must now only be published as a TXT resource record type, "
+                   "with code 16, and not with formerly supported SPF resource record type, with code 99 (see RFC "
+                   "7208, Section 14.1).",
+    "solution": "Change SPF resource record type (code 99) to TXT resource record (code 16).",
 }
 
+# Custom issue
+# - Malformed SPF record (quoted TXT record, illegal term, etc.)
+# - Check for the "+all" mechanism or ?all. That means that anyone can send an email on your behalf. This setup is discouraged.
+# - Missing end of record, with ALL mechanism or REDIRECT modifier
 
-# Check for the "+all" mechanism. That means that anyone can send an email on your behalf. This setup is discouraged.
-
-# No items after the 'all' mechanism.
-# RFC 7208, Section 5.1: Mechanisms after "all" will never be tested. Mechanisms listed after "all" MUST be ignored.
-#  This alert means that you have a delivery problem due to a misconfigured SPF record. Tthere are one (1) or more tags after the "all" indicator in your SPF record. All of those tags that fall after the "all" tag are currently being ignored by mail servers. For example, if you have a record such as:
-#
-# v=spf1 ip4:1.2.3.4 ip4: 1.2.3.7 include:spf.example.com ~ all include:spf2.microsoft.com
-#
-# The include: spf2.microsoft.com will be IGNORED because it falls after the "all" tag. Therefore, per RFC 7208 Section 5.1, be sure to insert all desired tags before the ~all stipulation or the ensuing text will be disregarded.
-DIRECTIVES_AFTER_ALL = {
-    "severity": "low",
-    "confidence": "certain",
-    "title": 'Directives after "all" not allowed',
-    "description": '"all" directive is used as the rightmost directive in a record to provide an explicit default. '
-    'Directives after "all" are ignored and will never be tested.',
-    "solution": "",
-}
+# fmt: on

@@ -12,19 +12,6 @@ RUN mkdir -p /opt/patrowl-engines/owl_dns
 RUN mkdir -p /opt/patrowl-engines/owl_dns/results
 RUN mkdir -p /opt/patrowl-engines/owl_dns/external-libs
 
-# Set the working directory to /opt/<engine_name>
-WORKDIR /opt/patrowl-engines/owl_dns
-
-# Copy the current directory contents into the container at /
-COPY __init__.py .
-COPY engine_owl_dns.py .
-COPY owl_dns.json.sample owl_dns.json
-COPY requirements.txt .
-COPY README.md .
-COPY VERSION .
-COPY etc/ etc/
-COPY modules/ modules/
-
 WORKDIR /opt/patrowl-engines/owl_dns/external-libs
 RUN git clone https://github.com/Patrowl/Sublist3r
 WORKDIR /opt/patrowl-engines/owl_dns/external-libs/Sublist3r
@@ -32,10 +19,22 @@ RUN pip3 install --trusted-host pypi.python.org -r requirements.txt
 WORKDIR /opt/patrowl-engines/owl_dns/external-libs
 RUN git clone https://github.com/elceef/dnstwist
 
+# Set the working directory to /opt/<engine_name>
+WORKDIR /opt/patrowl-engines/owl_dns
+
 # Install python modules for engine
-WORKDIR /opt/patrowl-engines/owl_dns/
+COPY requirements.txt .
 RUN pip3 install --upgrade pip
 RUN pip3 install --trusted-host pypi.python.org -r requirements.txt
+
+# Copy the current directory contents into the container at /
+COPY __init__.py .
+COPY engine_owl_dns.py .
+COPY owl_dns.json.sample owl_dns.json
+COPY README.md .
+COPY VERSION .
+COPY etc/ etc/
+COPY modules/ modules/
 
 # TCP port exposed by the container (NAT)
 EXPOSE 5006
