@@ -7,7 +7,8 @@ NO_SPF_RECORD = {
                    "send email on behalf of your domain. It also tells receiving servers what to do with messages "
                    "after they're checked.",
     "solution": "List which servers are allowed to send email on behalf of your domain, and add an SPF record on that "
-                "domain. If your domain doesn't send mail, this SPF record must be added: v=spf1 -all",
+                "domain. If your domain doesn't send mail, this SPF record must be added: v=spf1 -all, or at least "
+                "v=spf1 ~all",
 }
 
 # RFC 7208, Section 3.2
@@ -17,7 +18,7 @@ MULTIPLE_SPF_RECORDS = {
     "title": "Multiple SPF records",
     "description": "A domain name must not have multiple records that would cause an authorization check to select "
                    "more than one record (see RFC 7208, Section 3.2).",
-    "solution": "Keep only one SPF record and delete the others: you should always update your SPF record, rather than"
+    "solution": "Keep only one SPF record and delete the others: you should always update your SPF record, rather than "
                 "creating a new record in addition to the existing one.",
 }
 
@@ -89,9 +90,39 @@ DEPRECATED_SPF_RECORD = {
     "solution": "Change SPF resource record type (code 99) to TXT resource record (code 16).",
 }
 
-# Custom issue
-# - Malformed SPF record (quoted TXT record, illegal term, etc.)
-# - Check for the "+all" mechanism or ?all. That means that anyone can send an email on your behalf. This setup is discouraged.
-# - Missing end of record, with ALL mechanism or REDIRECT modifier
+# Custom issues / Best practices
+
+# Malformed SPF record
+# - extra space before the start of the string
+# - extra space after the end of the string
+# - surrounded by quotation marks
+# - illegal mechanisms
+MALFORMED_SPF_RECORD = {
+    "severity": "low",
+    "confidence": "certain",
+    "title": "Malformed SPF record"
+}
+
+# Permissive SPF record
+# - +all or just all
+# - ?all
+PERMISSIVE_SPF_RECORD = {
+    "severity": "low",
+    "confidence": "certain",
+    "title": "Permissive SPF record",
+    "description": "An SPF record is interpreted from left to right, the all mechanism will match all senders that "
+                   "did not match the preceding mechanisms. Therefore, you should place the all mechanism at the end "
+                   "of the SPF record, and use it with the ~ (softfail) or - (fail) prefix. Do note that if no prefix "
+                   "is set, the + (pass) is used by default. This setup is  discouraged.",
+    "solution": "Use more strict mechanism like '-all', or '~all' if you do not feel ready yet."
+}
+
+# Missing end of record, with ALL mechanism or REDIRECT modifier
+MISS_SPF_RECORD_TERMINATION = {
+    "severity": "low",
+    "confidence": "certain",
+    "title": "Miss SPF record termination",
+    "description": "An SPF record should conclude with either an 'all' mechanism or a 'redirect' modifier."
+}
 
 # fmt: on
