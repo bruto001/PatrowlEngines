@@ -45,14 +45,17 @@ DNS_LOOKUP_LIMIT = {
 }
 
 # TODO: RFC 7208, Section 4.6.4
+# ARS-437
 #  In addition for MX mechanism, the evaluation of each "MX" record MUST NOT result in querying more than 10 address
 #  records -- either "A" or "AAAA" resource records.
 
 # TODO: RFC 7208, Section 4.6.4
+# ARS-437
 #  In addition for PTR mechanism, the evaluation of each "PTR" record MUST NOT result in querying more than 10 address
 #  records -- either "A" or "AAAA" resource records.
 
 # TODO: RFC 7208, Section 4.6.4
+# ARS-437
 #  SPF implementations SHOULD limit "void lookups" to two (DNS queries return either a positive answer (RCODE 0) with an
 #  answer count of 0, or a "Name Error" (RCODE) answer.
 
