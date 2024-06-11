@@ -1,14 +1,25 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, sys, json, time, urllib, hashlib, threading
-import datetime, copy, dns.resolver, socket, optparse, random, string
-from flask import Flask, request, jsonify, redirect, url_for, send_from_directory
+import os
+import sys
+import json
+import time
+import hashlib
+import threading
+import datetime
+import copy
+import dns.resolver
+import socket
+import optparse
+import random
+import string
+from flask import Flask, request, jsonify
 import validators
 import requests
 import whois
 from ipwhois import IPWhois
-from modules.dnstwist import dnstwist
+from modules.dnstwist import DnsTwist
 from modules.dkimsignatures import dkimlist
 from concurrent.futures import ThreadPoolExecutor
 from netaddr import IPAddress, IPNetwork
@@ -19,7 +30,6 @@ import re
 # sys.path.append("./PatrowlEnginesUtils/")
 from PatrowlEnginesUtils.PatrowlEngine import _json_serial
 from PatrowlEnginesUtils.PatrowlEngine import PatrowlEngine
-from PatrowlEnginesUtils.PatrowlEngineExceptions import PatrowlEngineExceptions
 
 app = Flask(__name__)
 APP_DEBUG = os.environ.get("DEBUG", "").lower() in ["true", "1", "yes", "y", "on"]
@@ -35,22 +45,23 @@ APP_WF_MAX_PAGE = int(os.environ.get("APP_WF_MAX_PAGE", 10))
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 this = sys.modules[__name__]
 
+ENGINE_TIME_OUT = 5.0
+
 engine = PatrowlEngine(
     app=app, base_dir=BASE_DIR, name=APP_ENGINE_NAME, max_scans=APP_MAXSCANS
 )
 this.engine = engine
 
 
-engine["metadata"]["scan_lock"] = threading.RLock()
-engine["metadata"]["wf_apitokens"] = []
-engine["metadata"]["resolver"] = dns.resolver.Resolver()
-engine["metadata"]["resolver"]["lifetime"] = engine["metadata"]["resolver"].timeout = (
-    5.0
-)
+engine.metadata["scan_lock"] = threading.RLock()
+engine.metadata["wf_apitokens"] = []
+engine.metadata["resolver"] = dns.resolver.Resolver()
+engine.metadata["resolver"].timeout = ENGINE_TIME_OUT
+engine.metadata["resolver"].lifetime = ENGINE_TIME_OUT
 list_nameservers = os.environ.get("NAMESERVER", "8.8.8.8,8.8.4.4").split(",")
-engine["metadata"]["resolver"]["nameservers"] = list_nameservers
+engine.metadata["resolver"].nameservers = list_nameservers
 #
-engine["metadata"]["pool"] = ThreadPoolExecutor(5)
+engine.metadata["pool"] = ThreadPoolExecutor(5)
 
 
 def get_random_string(n=32):
@@ -98,7 +109,7 @@ def _loadconfig():
         engine.scanner["status"] = "READY"
         sys.path.append(engine.scanner["sublist3r_bin_path"])
         globals()["sublist3r"] = __import__("sublist3r")
-        dnstwist(engine.scanner["dnstwist_bin_path"])
+        DnsTwist(engine.scanner["dnstwist_bin_path"])
 
     else:
         app.logger.error(f"Error: config file '{conf_file}' not found")
@@ -122,9 +133,9 @@ def _loadconfig():
             "reason": "path to external IP ranges (CDN, WAF, Cloud) not found.",
         }
 
-    engine["metadata"]["wf_apitokens"] = []
+    engine.metadata["wf_apitokens"] = []
     for apikey in engine.scanner["whoisfreak_api_tokens"]:
-        engine["metadata"]["wf_apitokens"].append(apikey)
+        engine.metadata["wf_apitokens"].append(apikey)
     del engine.scanner["whoisfreak_api_tokens"]
 
     version_filename = f"{BASE_DIR}/VERSION"
@@ -220,9 +231,7 @@ def start_scan():
     if "do_whois" in scan["options"].keys() and data["options"]["do_whois"]:
         for asset in data["assets"]:
             if asset["datatype"] in ["domain", "ip", "fqdn"]:
-                th = engine["metadata"]["pool"].submit(
-                    _get_whois, scan_id, asset["value"]
-                )
+                th = engine.metadata["pool"].submit(_get_whois, scan_id, asset["value"])
                 engine.scans[scan_id]["futures"].append(th)
 
     if (
@@ -231,9 +240,7 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = engine["metadata"]["pool"].submit(
-                    _get_whois, scan_id, asset["value"]
-                )
+                th = engine.metadata["pool"].submit(_get_whois, scan_id, asset["value"])
                 engine.scans[scan_id]["futures"].append(th)
 
     # subdomains enumeration using search engines, VT and public PassiveDNS API
@@ -243,7 +250,7 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _subdomain_enum, scan_id, asset["value"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -254,7 +261,7 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _dns_resolve, scan_id, asset["value"], True
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -262,7 +269,7 @@ def start_scan():
     if "do_dns_resolve" in scan["options"].keys() and data["options"]["do_dns_resolve"]:
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _dns_resolve, scan_id, asset["value"], False
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -270,7 +277,7 @@ def start_scan():
     if "do_seg_check" in scan["options"].keys() and data["options"]["do_seg_check"]:
         for asset in data["assets"]:
             if asset["datatype"] in ["domain", "fqdn"]:
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _do_seg_check, scan_id, asset["value"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -308,7 +315,7 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _subdomain_bruteforce, scan_id, asset["value"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -316,7 +323,7 @@ def start_scan():
     if "do_reverse_dns" in scan["options"].keys() and data["options"]["do_reverse_dns"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _reverse_dns, scan_id, asset["value"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -325,59 +332,45 @@ def start_scan():
         "do_dnstwist_subdomain_search" in scan["options"].keys()
         and data["options"]["do_dnstwist_subdomain_search"]
     ):
-        # Check if extra TLD should be tested
-        tld = False
-        if (
-            "dnstwist_check_tld" in scan["options"].keys()
-            and data["options"]["dnstwist_check_tld"]
-        ):
-            tld = engine.scanner["dnstwist_common_tlds"]
-        check_ssdeep = False
-        if (
-            "dnstwist_check_ssdeep" in scan["options"].keys()
-            and data["options"]["dnstwist_check_ssdeep"]
-        ):
-            check_ssdeep = True
-        check_geoip = False
-        if (
-            "dnstwist_check_geoip" in scan["options"].keys()
-            and data["options"]["dnstwist_check_geoip"]
-        ):
-            check_geoip = True
-        check_mx = False
-        if (
-            "dnstwist_check_mx" in scan["options"].keys()
-            and data["options"]["dnstwist_check_mx"]
-        ):
-            check_mx = True
-        check_whois = False
-        if (
-            "dnstwist_check_whois" in scan["options"].keys()
-            and data["options"]["dnstwist_check_whois"]
-        ):
-            check_whois = True
-        check_banners = False
-        if (
-            "dnstwist_check_banners" in scan["options"].keys()
-            and data["options"]["dnstwist_check_banners"]
-        ):
-            check_banners = True
+        options = {
+            "tld": False,
+            "check_ssdeep": False,
+            "check_geoip": False,
+            "check_mx": False,
+            "check_whois": False,
+            "check_banners": False,
+        }
+
+        # Dictionary to map option names to their variables and initial values
+        options_mapping = {
+            "dnstwist_check_tld": ("tld", engine.scanner["dnstwist_common_tlds"]),
+            "dnstwist_check_ssdeep": ("check_ssdeep", True),
+            "dnstwist_check_geoip": ("check_geoip", True),
+            "dnstwist_check_mx": ("check_mx", True),
+            "dnstwist_check_whois": ("check_whois", True),
+            "dnstwist_check_banners": ("check_banners", True),
+        }
+
+        # Check if options should be tested
+        for option, (var_name, value) in options_mapping.items():
+            if option in scan["options"].keys() and data["options"].get(option):
+                options[var_name] = value
+
         timeout = APP_TIMEOUT
         if "max_timeout" in scan["options"].keys() and data["options"]["max_timeout"]:
             timeout = data["options"]["max_timeout"]
 
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = engine["metadata"]["pool"].submit(
-                    dnstwist.search_subdomains,
-                    scan_id,
+                th = engine.metadata["pool"].submit(
+                    DnsTwist.search_subdomains,
                     asset["value"],
-                    tld,
-                    check_ssdeep,
-                    check_geoip,
-                    check_mx,
-                    check_whois,
-                    check_banners,
+                    options["tld"],
+                    options["check_ssdeep"],
+                    options["check_geoip"],
+                    options["check_mx"],
+                    options["check_whois"],
+                    options["check_banners"],
                     timeout,
                 )
                 engine.scans[scan_id]["dnstwist"][asset["value"]] = {}
@@ -389,7 +382,7 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] in ["domain", "fqdn", "keyword", "email"]:
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _reverse_whois, scan_id, asset["value"], asset["datatype"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -397,7 +390,7 @@ def start_scan():
     if "do_cdn_check" in scan["options"].keys() and data["options"]["do_cdn_check"]:
         for asset in data["assets"]:
             if asset["datatype"] in ["ip", "domain", "fqdn"]:
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _cdn_check, scan_id, asset["value"], asset["datatype"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -405,7 +398,7 @@ def start_scan():
     if "do_waf_check" in scan["options"].keys() and data["options"]["do_waf_check"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _waf_check, scan_id, asset["value"], asset["datatype"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -413,7 +406,7 @@ def start_scan():
     if "do_cloud_check" in scan["options"].keys() and data["options"]["do_cloud_check"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _cloud_check, scan_id, asset["value"], asset["datatype"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -421,7 +414,7 @@ def start_scan():
     if "do_saas_check" in scan["options"].keys() and data["options"]["do_saas_check"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = engine["metadata"]["pool"].submit(
+                th = engine.metadata["pool"].submit(
                     _saas_check, scan_id, asset["value"], asset["datatype"]
                 )
                 engine.scans[scan_id]["futures"].append(th)
@@ -498,13 +491,13 @@ def _get_wf_domains(wf_url: str, max_pages: int):
 def _reverse_whois(scan_id, asset, datatype):
     res = {}
     domains = []
-    if len(engine["metadata"]["wf_apitokens"]) == 0:
+    if len(engine.metadata["wf_apitokens"]) == 0:
         # No whoisfreak API Token available
         return res
 
     # Select an API KEY
-    apikey = engine["metadata"]["wf_apitokens"][
-        random.randint(0, len(engine["metadata"]["wf_apitokens"]) - 1)
+    apikey = engine.metadata["wf_apitokens"][
+        random.randint(0, len(engine.metadata["wf_apitokens"]) - 1)
     ]
 
     # Check the asset is a valid domain name or IP Address
@@ -791,7 +784,7 @@ def _do_dmarc_check(scan_id, asset_value):
                         if num < 100:
                             dmarc_dict["dmarc_partial_coverage"] = "medium"
 
-    with engine["metadata"]["scan_lock"]:
+    with engine.metadata["scan_lock"]:
         engine.scans[scan_id]["findings"]["dmarc_dict"] = {asset_value: dmarc_dict}
         engine.scans[scan_id]["findings"]["dmarc_dict_dns_records"] = {
             asset_value: dns_records
@@ -815,7 +808,7 @@ def _do_dkim_check(scan_id, asset_value):
     else:
         dkim_dict["dkim"] = dkim_found_list
 
-    with engine["metadata"]["scan_lock"]:
+    with engine.metadata["scan_lock"]:
         engine.scans[scan_id]["findings"]["dkim_dict"] = {asset_value: dkim_dict}
         engine.scans[scan_id]["findings"]["dkim_dict_dns_records"] = {
             asset_value: dns_records
@@ -851,7 +844,7 @@ def _perform_spf_check(scan_id, asset_value):
                     spf_dict["no_spf_all_or_?all"] = "high"
                     spf_dict["title_prefix"] = "No SPF or ALL"
 
-    with engine["metadata"]["scan_lock"]:
+    with engine.metadata["scan_lock"]:
         engine.scans[scan_id]["findings"]["spf_dict"] = {asset_value: spf_dict}
         engine.scans[scan_id]["findings"]["spf_dict_dns_records"] = {
             asset_value: dns_records
@@ -879,7 +872,7 @@ def __dns_resolve_asset(asset, type_of_record=False):
             record_types = [type_of_record]
         for record_type in record_types:
             try:
-                answers = engine["metadata"]["resolver"].query(asset, record_type)
+                answers = engine.metadata["resolver"].query(asset, record_type)
                 sub_res.append(
                     {
                         "record_type": record_type,
@@ -905,7 +898,7 @@ def _reverse_dns(scan_id, asset):
         return res
 
     try:
-        answers = engine["metadata"]["resolver"].query(
+        answers = engine.metadata["resolver"].query(
             dns.reversename.from_address(asset), "PTR"
         )
         res.update({asset: [str(rdata) for rdata in answers]})
@@ -1378,7 +1371,7 @@ def _parse_results(scan_id):
     if "dnstwist" in engine.scans[scan_id].keys():
         for asset in engine.scans[scan_id]["dnstwist"].keys():
             try:
-                dnstwist_issues = dnstwist.parse_results(
+                dnstwist_issues = DnsTwist.parse_results(
                     ts, asset, engine.scans[scan_id]["dnstwist"][asset]
                 )
             except KeyError:
