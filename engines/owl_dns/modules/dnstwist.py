@@ -72,8 +72,9 @@ class DnsTwist:
     def parse_results(cls, ts, asset, domains):
         issues = []
         for domain in domains:
-            if domain["fuzzer"] == "original*":
+            if domain["fuzzer"] == "*original":
                 continue
+
             result_str = ""
             if "dns-a" in domain.keys():
                 result_str += "Resolved IPv4 (A): \n{}\n\n".format(
@@ -114,13 +115,13 @@ class DnsTwist:
                     "confidence": "certain",
                     "target": {"addr": [asset], "protocol": "domain"},
                     "title": "Suspicious domain found: {} (HASH: {})".format(
-                        domain["domain-name"], result_hash
+                        domain["domain"], result_hash
                     ),
                     "description": "DNS information for '{}':\n\n{}".format(
-                        domain["domain-name"], result_str
+                        domain["domain"], result_str
                     ),
                     "solution": "Check suspiciousness of domain '{}'".format(
-                        domain["domain-name"]
+                        domain["domain"]
                     ),
                     "metadata": {
                         "tags": ["domains", "dns", "fraudulent", "typosquatting"]

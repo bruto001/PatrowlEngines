@@ -1265,11 +1265,11 @@ def status_scan(scan_id):
                 all_threads_finished = False
                 break
             else:
-                # try:
-                #     dnstwist_asset, dnstwist_results = f.result()
-                #     engine.scans[scan_id]['dnstwist'][dnstwist_asset] = dnstwist_results
-                # except Exception:
-                #     pass
+                try:
+                    dnstwist_asset, dnstwist_results = f.result()
+                    engine.scans[scan_id]["dnstwist"][dnstwist_asset] = dnstwist_results
+                except Exception:
+                    pass
                 engine.scans[scan_id]["futures"].remove(f)
 
     if (
@@ -1367,7 +1367,6 @@ def _parse_results(scan_id):
     ts = int(time.time() * 1000)
 
     # dnstwist
-    # print(engine.scans[scan_id]['dnstwist'].keys())
     if "dnstwist" in engine.scans[scan_id].keys():
         for asset in engine.scans[scan_id]["dnstwist"].keys():
             try:

@@ -5,6 +5,7 @@ LABEL Name="Patrowl\ DNS\ \(Patrowl engine\)" Version="1.5.9-rc1"
 RUN apk add --update --no-cache \
   python3 python3-dev py3-pip \
   git \
+  build-base linux-headers \
   && rm -rf /var/cache/apk/*
 
 # Create the target repo
