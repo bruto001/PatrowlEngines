@@ -1,6 +1,6 @@
 {
 	"name": "Nmap",
-	"version": "1.5.0rc1",
+	"version": "1.5.0rc2",
 	"description": "Network Scanner",
 	"path": "/usr/bin/nmap",
 	"allowed_asset_types": ["ip", "domain", "fqdn", "url", "ip-range", "ip-subnet"],
