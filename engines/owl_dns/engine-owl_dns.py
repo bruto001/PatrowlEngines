@@ -208,7 +208,9 @@ def start_scan():
         "threads": [],
         "futures": [],
         "dnstwist": {},
-        "options": data["options"],
+        "position": data.get("position", 0),
+        "root_scan_id": data.get("root_scan_id", 0),
+        "options": data.get("options", {}),
         "scan_id": scan_id,
         "status": "STARTED",
         "started_at": int(time.time() * 1000),
@@ -1313,7 +1315,7 @@ def status():
 
 def _status_owl_dns(full_status=False):
     """Get the status of the engine and all its scans."""
-    # FIXME ARS-280 this is c/c because of weird use of threadppol and futures field
+    # FIXME ARS-280 this is c/c because of weird use of threadpool and futures field
     res = {"page": "status"}
     engine.scanner["status"] = "READY"
     status_code = 200
