@@ -14,17 +14,21 @@ import socket
 import optparse
 import random
 import string
-from flask import Flask, request, jsonify
 import validators
 import requests
 import whois
 from ipwhois import IPWhois
 from modules.dnstwist import DnsTwist
 from modules.dkimsignatures import dkimlist
+import re
+import urllib
 from concurrent.futures import ThreadPoolExecutor
+
+from flask import Flask, jsonify, redirect, request, send_from_directory, url_for
 from netaddr import IPAddress, IPNetwork
 from netaddr.core import AddrFormatError
-import re
+
+from etc.issues import spf_issues
 
 # Own library imports
 # sys.path.append("./PatrowlEnginesUtils/")
@@ -288,7 +292,7 @@ def start_scan():
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
                 th = threading.Thread(
-                    target=_perform_spf_check, args=(scan_id, asset["value"])
+                    target=_do_spf_check, args=(scan_id, asset["value"])
                 )
                 th.start()
                 engine.scans[scan_id]["threads"].append(th)
@@ -713,7 +717,7 @@ def _saas_check(scan_id: str, asset: str, datatype: str) -> dict:
 
 def _do_seg_check(scan_id, asset_value):
     seg_dict = []
-    dns_records = __dns_resolve_asset(asset_value, "MX")
+    dns_records = _dns_resolve_asset(asset_value, "MX")
     has_seg = False
 
     if len(dns_records) == 0:
@@ -755,23 +759,9 @@ def _do_seg_check(scan_id, asset_value):
             }
 
 
-def _recursive_spf_lookups(spf_line):
-    spf_lookups = 0
-    for word in spf_line.split(" "):
-        if "include:" in word:
-            url = word.replace("include:", "")
-            spf_lookups += 1
-            dns_resolve = __dns_resolve_asset(url, "TXT")
-            for record in dns_resolve:
-                for value in record["values"]:
-                    if "spf" in value:
-                        spf_lookups += _recursive_spf_lookups(value)
-    return spf_lookups
-
-
 def _do_dmarc_check(scan_id, asset_value):
     dmarc_dict = {"no_dmarc_record": "info"}
-    dns_records = __dns_resolve_asset(asset_value, "TXT")
+    dns_records = _dns_resolve_asset(asset_value, "TXT")
     for record in dns_records:
         for value in record["values"]:
             if "DMARC" in value:
@@ -799,7 +789,7 @@ def _do_dkim_check(scan_id, asset_value):
     dkim_found_list = {}
     for selector in dkimlist:
         dkim_record = selector + "._domainkey." + asset_value
-        dns_records = __dns_resolve_asset(dkim_record)
+        dns_records = _dns_resolve_asset(dkim_record)
         if len(dns_records) > 0:
             found_dkim = True
             for dns_record in dns_records:
@@ -817,41 +807,237 @@ def _do_dkim_check(scan_id, asset_value):
         }
 
 
-def _perform_spf_check(scan_id, asset_value):
-    dns_records = __dns_resolve_asset(asset_value, "TXT")
-    spf_dict = {"no_spf_found": "high", "spf_lookups": 0, "title_prefix": "No SPF"}
+def _do_spf_check(scan_id: int, asset_value: str) -> None:
+    """Check SPF record lookup"""
+    dns_txt_records = _dns_resolve_asset(asset_value, "TXT")
+    answers = dns_txt_records[0].get("answers") if dns_txt_records else []
+    # Parses SPF records
+    parsed_spf_record, issues = _parse_spf_record(answers)
 
-    for record in dns_records:
-        for value in record["values"]:
-            if "spf" in value:
-                spf_dict.pop("no_spf_found")
-                spf_lookups = _recursive_spf_lookups(value)
-                spf_dict["spf_lookups"] = spf_lookups
-                if spf_lookups > 10:
-                    spf_dict["spf_too_many_lookups"] = "medium"
-                    spf_dict["title_prefix"] = "Too many lookups"
-                if "+all" in value:
-                    spf_dict["+all_spf_found"] = "very high"
-                    spf_dict["title_prefix"] = "All SPF"
-                elif "~all" in value:
-                    spf_dict["~all_spf_found"] = "medium"
-                    spf_dict["title_prefix"] = "All SPF"
-                elif "?all" in value:
-                    spf_dict["no_spf_all_or_?all"] = "high"
-                    spf_dict["title_prefix"] = "No SPF or ALL"
-                elif "-all" in value:
-                    spf_dict["-all_spf_found?all"] = "info"
-                    spf_dict["title_prefix"] = "All SPF"
-                elif "all" not in value:
-                    spf_dict["no_spf_all_or_?all"] = "high"
-                    spf_dict["title_prefix"] = "No SPF or ALL"
+    # Issue: DEPRECATED_SPF_RECORD
+    dns_spf_records = _dns_resolve_asset(asset_value, "SPF")
+    if dns_spf_records:
+        issues.append(spf_issues.DEPRECATED_SPF_RECORD)
+
+    # Issue: DNS_LOOKUP_LIMIT
+    dns_lookup_limit = 10
+    try:
+        dns_lookup_count, spf_lookup_records = get_lookup_count_and_spf_records(
+            domain=asset_value
+        )
+    except RecursionError as error:
+        app.logger.info(
+            f"RecursionError on {asset_value} with get_lookup_count_and_spf_records: {error}"
+        )
+        issues.append(
+            dict(
+                spf_issues.DNS_LOOKUP_LIMIT,
+                extra_info=f"More than {sys.getrecursionlimit()} DNS lookups are required to validate SPF record.",
+            )
+        )
+    else:
+        if dns_lookup_count > dns_lookup_limit:
+            issues.append(
+                dict(
+                    spf_issues.DNS_LOOKUP_LIMIT,
+                    value=spf_lookup_records[0] if spf_lookup_records else "",
+                    extra_info=f"{dns_lookup_count} DNS lookups are required to validate SPF record.",
+                )
+            )
 
     with engine.metadata["scan_lock"]:
-        engine.scans[scan_id]["findings"]["spf_dict"] = {asset_value: spf_dict}
-        engine.scans[scan_id]["findings"]["spf_dict_dns_records"] = {
-            asset_value: dns_records
+        engine.scans[scan_id]["findings"].setdefault("spf_issues", {})
+        engine.scans[scan_id]["findings"]["spf_issues"][asset_value] = {
+            "issues": issues,
+            "parsed_spf_record": parsed_spf_record,
         }
-    return spf_dict
+
+
+def _parse_spf_record(dns_records: list[str]) -> tuple[list, list]:
+    # Basic mechanisms, they contribute to the language framework.
+    # They do not specify a particular type of authorization scheme.
+    basic_mechanisms = ["all", "include"]
+    # Designated sender mechanisms, they are used to designate a set of <ip> addresses as being permitted or
+    # not permitted to use the <domain> for sending mail.
+    designed_sender_mechanisms = ["a", "mx", "ptr", "ip4", "ip6", "exists"]
+
+    spf_record_count = 0
+    issues = []
+
+    for dns_record in dns_records:
+        value = dns_record.removeprefix('"').removesuffix('"').replace('" "', "")
+        # Check the version
+        if "v=spf1" not in value.lower():
+            continue
+        spf_record_count += 1
+
+        # Issue: MALFORMED_SPF_RECORD
+        if value[0] == " ":
+            issues.append(
+                dict(
+                    spf_issues.MALFORMED_SPF_RECORD,
+                    value=value,
+                    extra_info="There is an extra space before the start of the string.",
+                )
+            )
+            value = value.lstrip(" ")
+        # Check for extra spaces after the end of the string
+        if value[-1] == " ":
+            issues.append(
+                dict(
+                    spf_issues.MALFORMED_SPF_RECORD,
+                    value=value,
+                    extra_info="There is an extra space after the end of the string.",
+                )
+            )
+            value = value.rstrip(" ")
+        # Check for quoted TXT record
+        if value[0] == '"' or value[-1] == '"':
+            issues.append(
+                dict(
+                    spf_issues.MALFORMED_SPF_RECORD,
+                    value=value,
+                    extra_info="The SPF record is surrounded quotation marks.",
+                )
+            )
+            value = value.strip('"')
+
+        # Issue: DIRECTIVES_AFTER_ALL
+        directives_after_all = re.search(r"[-~?+]?all (.+)", value)
+        if directives_after_all:
+            issues.append(
+                dict(
+                    spf_issues.DIRECTIVES_AFTER_ALL,
+                    value=value,
+                    extra_info=f'These directives after "all" are ignored: {directives_after_all.group(1)}.',
+                )
+            )
+
+        # Issue: STRING_TOO_LONG
+        maximum_string_length = 255
+        for character_string in dns_record.strip('"').split('" "'):
+            if len(character_string) > maximum_string_length:
+                issues.append(
+                    dict(
+                        spf_issues.STRING_TOO_LONG,
+                        value=value,
+                        extra_info=f"This part is {len(character_string)} characters long, "
+                        f"and therefore too long: {character_string}.",
+                    )
+                )
+                continue
+
+        # List of directives
+        spf_directives = value.split()
+        spf_directives.pop(0)  # version is not a directive, remove it from directives
+
+        # Issue: MISS_SPF_RECORD_TERMINATION
+        if not re.search(r"[-~?+]?(all|redirect=)", spf_directives[-1].lower()):
+            issues.append(dict(spf_issues.MISS_SPF_RECORD_TERMINATION, value=value))
+
+        for spf_directive in spf_directives:
+            directive_qualifier = "+"  # qualifier is optional, and defaults to "+"
+            directive_value = ""
+            if "=" in spf_directive:  # Modifiers, and not mechanisms
+                directive_type, directive_value = spf_directive.split("=")
+                directive_type = directive_type.lower()
+                directive_value = directive_value.lower()
+                parsed_spf_record.append([directive_qualifier, directive_type, directive_value])
+                # Unrecognized modifiers MUST be ignored
+                continue
+            if ":" in spf_directive:  # Mechanisms with value
+                directive_type, directive_value = spf_directive.split(":")
+                directive_type = directive_type.lower()
+                directive_value = directive_value.lower()
+            else:  # Mechanisms without value
+                directive_type = spf_directive.lower()
+            if directive_type.startswith(("-", "~", "?", "+")):
+                directive_qualifier = directive_type[0]
+                directive_type = directive_type[1:].lower()
+
+            if directive_type not in basic_mechanisms + designed_sender_mechanisms:
+                issues.append(
+                    dict(
+                        spf_issues.MALFORMED_SPF_RECORD,
+                        value=value,
+                        extra_info=f"'{directive_type}' is an illegal term.",
+                    )
+                )
+
+            if directive_type == "ptr":
+                issues.append(dict(spf_issues.PRESENCE_OF_PTR, value=value))
+            elif directive_type == "all" and directive_qualifier in ["?", "+"]:
+                issues.append(dict(spf_issues.PERMISSIVE_SPF_RECORD, value=value))
+
+            parsed_spf_record.append([directive_qualifier, directive_type, directive_value])
+
+    # Issue: NO_SPF_RECORD
+    if spf_record_count == 0:
+        issues.append(
+            dict(
+                spf_issues.NO_SPF_RECORD,
+                extra_info=(
+                    f"Other DNS TXT records are: {', '.join(dns_records)}."
+                    if dns_records
+                    else "There is no DNS TXT record."
+                ),
+            )
+        )
+    # Issue: MULTIPLE_SPF_RECORDS
+    elif spf_record_count > 1:
+        issues.append(
+            dict(
+                spf_issues.MULTIPLE_SPF_RECORDS,
+                extra_info=f"Other DNS TXT records are: {', '.join(dns_records)}.",
+            )
+        )
+
+    return parsed_spf_record, issues
+
+
+def get_lookup_count_and_spf_records(domain: str) -> tuple[int, list[tuple[str, str]]]:
+    """Count the numbers of DNS queries during SPF evaluation and retrieve the SPF records
+
+    The following terms cause DNS queries: the "include", "a", "mx", "ptr", and "exists" mechanisms, and the "redirect"
+    modifier. SPF implementations MUST limit the total number of those terms to 10 during SPF evaluation, to avoid
+    an unreasonable load on the DNS.
+
+    :param domain: A domain name
+    :return: Number of DNS queries during SPF evaluation, and the list of SPF records queried
+    """
+    dns_records = _dns_resolve_asset(domain, "TXT")
+    if not dns_records:
+        return 0, []
+
+    spf_records = list(
+        filter(
+            lambda dns_record: dns_record.lower().startswith("v=spf1"),
+            dns_records[0].get("values"),
+        )
+    )
+    if not spf_records:
+        return 0, []
+
+    spf_record = spf_records[0]
+    lookup_domains = re.findall(
+        r"\b[+\-~?]?(?:include:|redirect=)(\S+)\b", spf_record, re.IGNORECASE
+    )
+    other_terms_count = len(
+        re.findall(r"\b[+\-~?]?(a|mx|ptr|exists):?\b", spf_record, re.IGNORECASE)
+    )
+    if not lookup_domains:
+        return other_terms_count, [(domain, spf_record)]
+
+    dns_lookup_count = len(lookup_domains) + other_terms_count
+    spf_lookup_records = [(domain, spf_record)]
+    for lookup_domain in lookup_domains:
+        domain_dns_lookup_count, domain_spf_lookup_records = (
+            get_lookup_count_and_spf_records(lookup_domain)
+        )
+        dns_lookup_count += domain_dns_lookup_count
+        spf_lookup_records.extend(domain_spf_lookup_records)
+
+    return dns_lookup_count, spf_lookup_records
 
 
 def _dns_resolve(scan_id, asset, check_subdomains=False):
@@ -861,34 +1047,42 @@ def _dns_resolve(scan_id, asset, check_subdomains=False):
             engine.scans[scan_id]["findings"]["dns_resolve"] = {}
         engine.scans[scan_id]["findings"]["dns_resolve"][asset] = {}
         engine.scans[scan_id]["findings"]["dns_resolve"][asset] = copy.deepcopy(
-            __dns_resolve_asset(asset)
+            _dns_resolve_asset(asset)
         )
     return engine.scans[scan_id]["findings"]["dns_resolve"][asset]
 
 
-def __dns_resolve_asset(asset, type_of_record=False):
+def _dns_resolve_asset(
+    asset: str, type_of_record: str = None
+) -> list[dict[str, str | list[str]]]:
     sub_res = []
-    try:
-        record_types = ["CNAME", "A", "AAAA", "MX", "NS", "TXT", "SOA", "SRV"]
-        if type_of_record:
-            record_types = [type_of_record]
-        for record_type in record_types:
-            try:
-                answers = engine.metadata["resolver"].query(asset, record_type)
-                sub_res.append(
-                    {
-                        "record_type": record_type,
-                        "values": [str(rdata) for rdata in answers],
-                    }
-                )
-            except dns.resolver.NoAnswer:
-                pass
-            except dns.resolver.Timeout:
-                pass
-            except Exception:
-                pass
-    except dns.resolver.NXDOMAIN:
-        pass
+    record_types = ["CNAME", "A", "AAAA", "MX", "NS", "TXT", "SOA", "SRV"]
+    if type_of_record:
+        record_types = [type_of_record]
+    for record_type in record_types:
+        try:
+            answers = engine.metadata["resolver"].query(asset, record_type)
+        except dns.resolver.NoAnswer:
+            pass
+        except dns.resolver.Timeout:
+            pass
+        except dns.resolver.NXDOMAIN:
+            pass
+        except Exception as e:
+            app.logger.error(
+                f"DNS resolve raises an exception for asset '{asset}': {e}"
+            )
+        else:
+            sub_res.append(
+                {
+                    "record_type": record_type,
+                    "values": [
+                        str(rdata).strip('"').replace('" "', " ") for rdata in answers
+                    ],
+                    "answers": [str(rdata) for rdata in answers],
+                }
+            )
+
     return sub_res
 
 
@@ -1093,13 +1287,13 @@ def _subdomain_bruteforce(scan_id, asset):
 
     # Check wildcard domain
     w_domain = "{}.{}".format(get_random_string(), asset)
-    if len(__dns_resolve_asset(w_domain)) > 0:
+    if len(_dns_resolve_asset(w_domain)) > 0:
         return res
 
     valid_sudoms = []
     for sub in SUB_LIST:
         subdom = ".".join((sub, asset))
-        results = __dns_resolve_asset(subdom)
+        results = _dns_resolve_asset(subdom)
 
         if len(results) > 0:
             valid_sudoms.append(subdom)
@@ -1163,7 +1357,7 @@ def _subdomain_enum(scan_id, asset):
     ):
         res_subdomains = {}
         for s in sub_res:
-            data = __dns_resolve_asset(s)
+            data = _dns_resolve_asset(s)
             if len(data) > 0:
                 res_subdomains.update({s: data})
 
@@ -1472,33 +1666,38 @@ def _parse_results(scan_id):
                 }
             )
 
-    if "spf_dict" in scan["findings"].keys():
-        for asset in scan["findings"]["spf_dict"].keys():
-            spf_check = scan["findings"]["spf_dict"][asset]
-            spf_check_dns_records = scan["findings"]["spf_dict_dns_records"][asset]
-            spf_hash = hashlib.sha1(
-                str(spf_check_dns_records).encode("utf-8")
-            ).hexdigest()[:6]
-            spf_check.pop("spf_lookups")
-            title_prefix = spf_check.pop("title_prefix")
+    if "spf_issues" in scan["findings"]:
+        for asset_value in scan["findings"]["spf_issues"]:
+            issues_from_spf_check = scan["findings"]["spf_issues"][asset_value][
+                "issues"
+            ]
+            parsed_spf_record = scan["findings"]["spf_issues"][asset_value]["parsed_spf_record"]
 
-            for c in spf_check:
-                h = str(c) + str(spf_check_dns_records)
-                spf_hash = hashlib.sha1(h.encode("utf-8")).hexdigest()[:6]
+            for spf_issue in issues_from_spf_check:
+                description = spf_issue.get("description")
+                if spf_issue.get("value"):
+                    description += f"\n\nThe SPF record is: {spf_issue['value']}"
+                if spf_issue.get("extra_info"):
+                    description += f"\n\n{spf_issue['extra_info']}"
+
                 issues.append(
                     {
                         "issue_id": len(issues) + 1,
-                        "severity": spf_check[c],
-                        "confidence": "certain",
-                        "target": {"addr": [asset], "protocol": "domain"},
-                        "title": "{} found for '{}' (HASH: {})".format(
-                            title_prefix, asset, spf_hash
-                        ),
-                        "description": "{}\n".format(c),
-                        "solution": "n/a",
+                        "severity": spf_issue.get("severity", "info"),
+                        "confidence": spf_issue.get("confidence", "certain"),
+                        "target": {"addr": [asset_value], "protocol": "domain"},
+                        "title": spf_issue.get("title"),
+                        "description": description,
+                        "solution": spf_issue.get("solution"),
                         "metadata": {"tags": ["domains", "spf"]},
                         "type": "spf_check",
-                        "raw": scan["findings"]["spf_dict"][asset],
+                        "raw": {
+                            "description": spf_issue.get("description"),
+                            "solution": spf_issue.get("solution"),
+                            "parsed": parsed_spf_record,
+                            "value": spf_issue.get("value"),
+                            "extra_info": spf_issue.get("extra_info"),
+                        },
                         "timestamp": ts,
                     }
                 )
