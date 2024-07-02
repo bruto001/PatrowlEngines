@@ -231,15 +231,17 @@ def start():
         )
         return jsonify(res), 503
 
+    options = {}
     if isinstance(data["options"], str):
-        data["options"] = json.loads(data["options"])
+        options = json.loads(data["options"])
 
     scan = {
         "assets": data["assets"],
         "threads": {},
         "proc": None,
-        "position": data["position"],
-        "options": data["options"],
+        "position": data.get("position", 0),
+        "root_scan_id": data.get("root_scan_id", 0),
+        "options": options,
         "scan_id": scan_id,
         "status": "STARTED",
         "issues_available": False,
