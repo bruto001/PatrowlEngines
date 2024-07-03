@@ -1,57 +1,71 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import copy
-import datetime
-import hashlib
-import json
-import optparse
 import os
-import random
-import re
-import socket
-import string
 import sys
-import threading
+import json
 import time
+import hashlib
+import threading
+import datetime
+import copy
+import dns.resolver
+import socket
+import optparse
+import random
+import string
+import validators
+import requests
+import whois
+from ipwhois import IPWhois
+from modules.dnstwist import DnsTwist
+from modules.dkimsignatures import dkimlist
+import re
 import urllib
 from concurrent.futures import ThreadPoolExecutor
 
-import dns.resolver
-import requests
-import validators
-import whois
 from flask import Flask, jsonify, redirect, request, send_from_directory, url_for
-from ipwhois import IPWhois
 from netaddr import IPAddress, IPNetwork
 from netaddr.core import AddrFormatError
 
 from etc.issues import spf_issues
-from modules.dkimsignatures import dkimlist
-from modules.dnstwist import dnstwist
+
+# Own library imports
+# sys.path.append("./PatrowlEnginesUtils/")
+from PatrowlEnginesUtils.PatrowlEngine import _json_serial
+from PatrowlEnginesUtils.PatrowlEngine import PatrowlEngine
 
 app = Flask(__name__)
 APP_DEBUG = os.environ.get("DEBUG", "").lower() in ["true", "1", "yes", "y", "on"]
+APP_MAXSCANS = int(os.environ.get("APP_MAXSCANS", 10))
+
 APP_HOST = "0.0.0.0"
 APP_PORT = 5006
-APP_MAXSCANS = int(os.environ.get("APP_MAXSCANS", 5))
+APP_ENGINE_NAME = "owl_dns"
+
 APP_TIMEOUT = int(os.environ.get("APP_TIMEOUT", 3600))
 APP_WF_MAX_PAGE = int(os.environ.get("APP_WF_MAX_PAGE", 10))
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 this = sys.modules[__name__]
-this.scanner = {}
-this.scans = {}
-this.scan_lock = threading.RLock()
-this.wf_apitokens = []
 
-this.resolver = dns.resolver.Resolver()
-this.resolver.lifetime = this.resolver.timeout = 5.0
+ENGINE_TIME_OUT = 5.0
 
+engine = PatrowlEngine(
+    app=app, base_dir=BASE_DIR, name=APP_ENGINE_NAME, max_scans=APP_MAXSCANS
+)
+this.engine = engine
+
+
+engine.metadata["scan_lock"] = threading.RLock()
+engine.metadata["wf_apitokens"] = []
+engine.metadata["resolver"] = dns.resolver.Resolver()
+engine.metadata["resolver"].timeout = ENGINE_TIME_OUT
+engine.metadata["resolver"].lifetime = ENGINE_TIME_OUT
 list_nameservers = os.environ.get("NAMESERVER", "8.8.8.8,8.8.4.4").split(",")
-this.resolver.nameservers = list_nameservers
-
-this.pool = ThreadPoolExecutor(5)
+engine.metadata["resolver"].nameservers = list_nameservers
+#
+engine.metadata["pool"] = ThreadPoolExecutor(5)
 
 
 def get_random_string(n=32):
@@ -60,38 +74,61 @@ def get_random_string(n=32):
 
 @app.route("/")
 def default():
-    return redirect(url_for("index"))
+    return engine.default()
 
 
 @app.route("/engines/owl_dns/")
 def index():
-    return jsonify({"page": "index"})
+    return engine.index()
+
+
+@app.route("/engines/owl_dns/liveness")
+def liveness():
+    """Return liveness page."""
+    return engine.liveness()
+
+
+@app.route("/engines/owl_dns/readiness")
+def readiness():
+    """Return readiness page."""
+    return engine.readiness()
+
+
+@app.route("/engines/owl_dns/info")
+def info():
+    """Get info on running engine."""
+    return engine.info()
+
+
+def _engine_is_busy():
+    """Returns if engine is busy scanning."""
+    return engine._engine_is_busy()
 
 
 def _loadconfig():
     conf_file = f"{BASE_DIR}/owl_dns.json"
     if os.path.exists(conf_file):
         json_data = open(conf_file)
-        this.scanner = json.load(json_data)
-        this.scanner["status"] = "READY"
-        sys.path.append(this.scanner["sublist3r_bin_path"])
+        engine.scanner = json.load(json_data)
+        engine.scanner["status"] = "READY"
+        sys.path.append(engine.scanner["sublist3r_bin_path"])
         globals()["sublist3r"] = __import__("sublist3r")
-        dnstwist(this.scanner["dnstwist_bin_path"])
+        DnsTwist(engine.scanner["dnstwist_bin_path"])
 
     else:
         app.logger.error(f"Error: config file '{conf_file}' not found")
         return {"status": "error", "reason": "config file not found"}
 
-    if not os.path.isfile(this.scanner["seg_path"]):
-        this.scanner["status"] = "ERROR"
+    if not os.path.isfile(engine.scanner["seg_path"]):
+        engine.scanner["status"] = "ERROR"
         app.logger.error("Error: path to Secure Email Gateway providers not found")
         return {
             "status": "ERROR",
             "reason": "path to Secure Email Gateway providers not found.",
         }
 
-    if not os.path.isfile(this.scanner["external_ip_ranges_path"]):
-        this.scanner["status"] = "ERROR"
+    if not os.path.isfile(engine.scanner["external_ip_ranges_path"]):
+        engine.scanner["status"] = "ERROR"
         app.logger.error(
             "Error: path to external IP ranges (CDN, WAF, Cloud) not found"
         )
@@ -100,15 +137,15 @@ def _loadconfig():
             "reason": "path to external IP ranges (CDN, WAF, Cloud) not found.",
         }
 
-    this.wf_apitokens = []
-    for apikey in this.scanner["whoisfreak_api_tokens"]:
-        this.wf_apitokens.append(apikey)
-    del this.scanner["whoisfreak_api_tokens"]
+    engine.metadata["wf_apitokens"] = []
+    for apikey in engine.scanner["whoisfreak_api_tokens"]:
+        engine.metadata["wf_apitokens"].append(apikey)
+    del engine.scanner["whoisfreak_api_tokens"]
 
     version_filename = f"{BASE_DIR}/VERSION"
     if os.path.exists(version_filename):
         version_file = open(version_filename, "r")
-        this.scanner["version"] = version_file.read().rstrip("\n")
+        engine.scanner["version"] = version_file.read().rstrip("\n")
         version_file.close()
 
 
@@ -116,7 +153,7 @@ def _loadconfig():
 def reloadconfig():
     res = {"page": "reloadconfig"}
     _loadconfig()
-    res.update({"config": this.scanner})
+    res.update({"config": engine.scanner})
     return jsonify(res)
 
 
@@ -126,7 +163,7 @@ def start_scan():
     res = {"page": "startscan"}
 
     # check the scanner is ready to start a new scan
-    if len(this.scans) == APP_MAXSCANS * 2:
+    if len(engine.scans) == APP_MAXSCANS * 2:
         res.update(
             {
                 "status": "error",
@@ -149,7 +186,7 @@ def start_scan():
 
     scan_id = str(data["scan_id"])
 
-    this.scans.update(
+    engine.scans.update(
         {
             scan_id: {
                 "status": "STARTED",
@@ -160,24 +197,24 @@ def start_scan():
     )
 
     status()
-    if this.scanner["status"] != "READY":
+    if engine.scanner["status"] != "READY":
         res.update(
             {
                 "status": "refused",
                 "details": {
                     "reason": "scanner not ready",
-                    "status": this.scanner["status"],
+                    "status": engine.scanner["status"],
                 },
             }
         )
-        this.scans.update(
+        engine.scans.update(
             {
                 scan_id: {
                     "status": "ERROR",
                 }
             }
         )
-        this.scans.pop(scan_id, None)
+        engine.scans.pop(scan_id, None)
         return jsonify(res), 503
 
     # Sanitize args :
@@ -186,20 +223,22 @@ def start_scan():
         "threads": [],
         "futures": [],
         "dnstwist": {},
-        "options": data["options"],
+        "position": data.get("position", 0),
+        "root_scan_id": data.get("root_scan_id", 0),
+        "options": data.get("options", {}),
         "scan_id": scan_id,
         "status": "STARTED",
         "started_at": int(time.time() * 1000),
         "findings": {},
     }
 
-    this.scans.update({scan_id: scan})
+    engine.scans.update({scan_id: scan})
 
     if "do_whois" in scan["options"].keys() and data["options"]["do_whois"]:
         for asset in data["assets"]:
             if asset["datatype"] in ["domain", "ip", "fqdn"]:
-                th = this.pool.submit(_get_whois, scan_id, asset["value"])
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(_get_whois, scan_id, asset["value"])
+                engine.scans[scan_id]["futures"].append(th)
 
     if (
         "do_advanced_whois" in scan["options"].keys()
@@ -207,8 +246,8 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = this.pool.submit(_get_whois, scan_id, asset["value"])
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(_get_whois, scan_id, asset["value"])
+                engine.scans[scan_id]["futures"].append(th)
 
     # subdomains enumeration using search engines, VT and public PassiveDNS API
     if (
@@ -217,8 +256,10 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = this.pool.submit(_subdomain_enum, scan_id, asset["value"])
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(
+                    _subdomain_enum, scan_id, asset["value"]
+                )
+                engine.scans[scan_id]["futures"].append(th)
 
     if (
         "do_subdomains_resolve" in scan["options"].keys()
@@ -226,20 +267,26 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = this.pool.submit(_dns_resolve, scan_id, asset["value"], True)
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(
+                    _dns_resolve, scan_id, asset["value"], True
+                )
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_dns_resolve" in scan["options"].keys() and data["options"]["do_dns_resolve"]:
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = this.pool.submit(_dns_resolve, scan_id, asset["value"], False)
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(
+                    _dns_resolve, scan_id, asset["value"], False
+                )
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_seg_check" in scan["options"].keys() and data["options"]["do_seg_check"]:
         for asset in data["assets"]:
             if asset["datatype"] in ["domain", "fqdn"]:
-                th = this.pool.submit(_do_seg_check, scan_id, asset["value"])
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(
+                    _do_seg_check, scan_id, asset["value"]
+                )
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_spf_check" in scan["options"].keys() and data["options"]["do_spf_check"]:
         for asset in data["assets"]:
@@ -248,7 +295,7 @@ def start_scan():
                     target=_do_spf_check, args=(scan_id, asset["value"])
                 )
                 th.start()
-                this.scans[scan_id]["threads"].append(th)
+                engine.scans[scan_id]["threads"].append(th)
 
     if "do_dkim_check" in scan["options"].keys() and data["options"]["do_dkim_check"]:
         for asset in data["assets"]:
@@ -257,7 +304,7 @@ def start_scan():
                     target=_do_dkim_check, args=(scan_id, asset["value"])
                 )
                 th.start()
-                this.scans[scan_id]["threads"].append(th)
+                engine.scans[scan_id]["threads"].append(th)
 
     if "do_dmarc_check" in scan["options"].keys() and data["options"]["do_dmarc_check"]:
         for asset in data["assets"]:
@@ -266,7 +313,7 @@ def start_scan():
                     target=_do_dmarc_check, args=(scan_id, asset["value"])
                 )
                 th.start()
-                this.scans[scan_id]["threads"].append(th)
+                engine.scans[scan_id]["threads"].append(th)
 
     if (
         "do_subdomain_bruteforce" in scan["options"].keys()
@@ -274,76 +321,66 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = this.pool.submit(_subdomain_bruteforce, scan_id, asset["value"])
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(
+                    _subdomain_bruteforce, scan_id, asset["value"]
+                )
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_reverse_dns" in scan["options"].keys() and data["options"]["do_reverse_dns"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = this.pool.submit(_reverse_dns, scan_id, asset["value"])
-                this.scans[scan_id]["futures"].append(th)
+                th = engine.metadata["pool"].submit(
+                    _reverse_dns, scan_id, asset["value"]
+                )
+                engine.scans[scan_id]["futures"].append(th)
 
     if (
         "do_dnstwist_subdomain_search" in scan["options"].keys()
         and data["options"]["do_dnstwist_subdomain_search"]
     ):
-        # Check if extra TLD should be tested
-        tld = False
-        if (
-            "dnstwist_check_tld" in scan["options"].keys()
-            and data["options"]["dnstwist_check_tld"]
-        ):
-            tld = this.scanner["dnstwist_common_tlds"]
-        check_ssdeep = False
-        if (
-            "dnstwist_check_ssdeep" in scan["options"].keys()
-            and data["options"]["dnstwist_check_ssdeep"]
-        ):
-            check_ssdeep = True
-        check_geoip = False
-        if (
-            "dnstwist_check_geoip" in scan["options"].keys()
-            and data["options"]["dnstwist_check_geoip"]
-        ):
-            check_geoip = True
-        check_mx = False
-        if (
-            "dnstwist_check_mx" in scan["options"].keys()
-            and data["options"]["dnstwist_check_mx"]
-        ):
-            check_mx = True
-        check_whois = False
-        if (
-            "dnstwist_check_whois" in scan["options"].keys()
-            and data["options"]["dnstwist_check_whois"]
-        ):
-            check_whois = True
-        check_banners = False
-        if (
-            "dnstwist_check_banners" in scan["options"].keys()
-            and data["options"]["dnstwist_check_banners"]
-        ):
-            check_banners = True
+        options = {
+            "tld": False,
+            "check_ssdeep": False,
+            "check_geoip": False,
+            "check_mx": False,
+            "check_whois": False,
+            "check_banners": False,
+        }
+
+        # Dictionary to map option names to their variables and initial values
+        options_mapping = {
+            "dnstwist_check_tld": ("tld", engine.scanner["dnstwist_common_tlds"]),
+            "dnstwist_check_ssdeep": ("check_ssdeep", True),
+            "dnstwist_check_geoip": ("check_geoip", True),
+            "dnstwist_check_mx": ("check_mx", True),
+            "dnstwist_check_whois": ("check_whois", True),
+            "dnstwist_check_banners": ("check_banners", True),
+        }
+
+        # Check if options should be tested
+        for option, (var_name, value) in options_mapping.items():
+            if option in scan["options"].keys() and data["options"].get(option):
+                options[var_name] = value
+
         timeout = APP_TIMEOUT
         if "max_timeout" in scan["options"].keys() and data["options"]["max_timeout"]:
             timeout = data["options"]["max_timeout"]
 
         for asset in data["assets"]:
             if asset["datatype"] == "domain":
-                th = this.pool.submit(
-                    dnstwist.search_subdomains,
-                    scan_id,
+                th = engine.metadata["pool"].submit(
+                    DnsTwist.search_subdomains,
                     asset["value"],
-                    tld,
-                    check_ssdeep,
-                    check_geoip,
-                    check_mx,
-                    check_whois,
-                    check_banners,
+                    options["tld"],
+                    options["check_ssdeep"],
+                    options["check_geoip"],
+                    options["check_mx"],
+                    options["check_whois"],
+                    options["check_banners"],
                     timeout,
                 )
-                this.scans[scan_id]["dnstwist"][asset["value"]] = {}
-                this.scans[scan_id]["futures"].append(th)
+                engine.scans[scan_id]["dnstwist"][asset["value"]] = {}
+                engine.scans[scan_id]["futures"].append(th)
 
     if (
         "do_reverse_whois" in scan["options"].keys()
@@ -351,42 +388,42 @@ def start_scan():
     ):
         for asset in data["assets"]:
             if asset["datatype"] in ["domain", "fqdn", "keyword", "email"]:
-                th = this.pool.submit(
+                th = engine.metadata["pool"].submit(
                     _reverse_whois, scan_id, asset["value"], asset["datatype"]
                 )
-                this.scans[scan_id]["futures"].append(th)
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_cdn_check" in scan["options"].keys() and data["options"]["do_cdn_check"]:
         for asset in data["assets"]:
             if asset["datatype"] in ["ip", "domain", "fqdn"]:
-                th = this.pool.submit(
+                th = engine.metadata["pool"].submit(
                     _cdn_check, scan_id, asset["value"], asset["datatype"]
                 )
-                this.scans[scan_id]["futures"].append(th)
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_waf_check" in scan["options"].keys() and data["options"]["do_waf_check"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = this.pool.submit(
+                th = engine.metadata["pool"].submit(
                     _waf_check, scan_id, asset["value"], asset["datatype"]
                 )
-                this.scans[scan_id]["futures"].append(th)
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_cloud_check" in scan["options"].keys() and data["options"]["do_cloud_check"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = this.pool.submit(
+                th = engine.metadata["pool"].submit(
                     _cloud_check, scan_id, asset["value"], asset["datatype"]
                 )
-                this.scans[scan_id]["futures"].append(th)
+                engine.scans[scan_id]["futures"].append(th)
 
     if "do_saas_check" in scan["options"].keys() and data["options"]["do_saas_check"]:
         for asset in data["assets"]:
             if asset["datatype"] == "ip":
-                th = this.pool.submit(
+                th = engine.metadata["pool"].submit(
                     _saas_check, scan_id, asset["value"], asset["datatype"]
                 )
-                this.scans[scan_id]["futures"].append(th)
+                engine.scans[scan_id]["futures"].append(th)
 
     res.update({"status": "accepted", "details": {"scan_id": scan["scan_id"]}})
 
@@ -460,12 +497,14 @@ def _get_wf_domains(wf_url: str, max_pages: int):
 def _reverse_whois(scan_id, asset, datatype):
     res = {}
     domains = []
-    if len(this.wf_apitokens) == 0:
+    if len(engine.metadata["wf_apitokens"]) == 0:
         # No whoisfreak API Token available
         return res
 
     # Select an API KEY
-    apikey = this.wf_apitokens[random.randint(0, len(this.wf_apitokens) - 1)]
+    apikey = engine.metadata["wf_apitokens"][
+        random.randint(0, len(engine.metadata["wf_apitokens"]) - 1)
+    ]
 
     # Check the asset is a valid domain name or IP Address
     if datatype in ["domain", "fqdn"]:
@@ -516,11 +555,11 @@ def _reverse_whois(scan_id, asset, datatype):
     # Limit max pages to rationalize credit usage
     max_pages = APP_WF_MAX_PAGE
     if (
-        "reverse_whois_max_pages" in this.scans[scan_id]["options"].keys()
-        and isinstance(this.scans[scan_id]["options"]["reverse_whois_max_pages"], int)
-        and this.scans[scan_id]["options"]["reverse_whois_max_pages"] > 0
+        "reverse_whois_max_pages" in engine.scans[scan_id]["options"].keys()
+        and isinstance(engine.scans[scan_id]["options"]["reverse_whois_max_pages"], int)
+        and engine.scans[scan_id]["options"]["reverse_whois_max_pages"] > 0
     ):
-        max_pages = this.scans[scan_id]["options"]["reverse_whois_max_pages"]
+        max_pages = engine.scans[scan_id]["options"]["reverse_whois_max_pages"]
 
     try:
         for wf_type in wf_types:
@@ -540,10 +579,10 @@ def _reverse_whois(scan_id, asset, datatype):
 
     scan_lock = threading.RLock()
     with scan_lock:
-        if "reverse_whois" not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["reverse_whois"] = {}
+        if "reverse_whois" not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["reverse_whois"] = {}
         if bool(res):
-            this.scans[scan_id]["findings"]["reverse_whois"].update(res)
+            engine.scans[scan_id]["findings"]["reverse_whois"].update(res)
 
     return res
 
@@ -561,7 +600,7 @@ def is_ipaddr_in_subnet(ip: str, subnet: str) -> bool:
 def _check_ip(ip: str, record_types: list = []) -> dict:
     """Check IP from CDN, WAF, Cloud, SaaS providers public records."""
 
-    with open(this.scanner["external_ip_ranges_path"]) as all_data_file:
+    with open(engine.scanner["external_ip_ranges_path"]) as all_data_file:
         all_data = json.loads(all_data_file.read())
 
     all_data_types = all_data.keys()  # ["cdn", "waf", "cloud", "parking", "saas"]
@@ -611,10 +650,10 @@ def _cdn_check(scan_id: str, asset: str, datatype: str) -> dict:
 
         scan_lock = threading.RLock()
         with scan_lock:
-            if "cdn_check" not in this.scans[scan_id]["findings"].keys():
-                this.scans[scan_id]["findings"]["cdn_check"] = {}
+            if "cdn_check" not in engine.scans[scan_id]["findings"].keys():
+                engine.scans[scan_id]["findings"]["cdn_check"] = {}
             if bool(res):
-                this.scans[scan_id]["findings"]["cdn_check"].update({asset: res})
+                engine.scans[scan_id]["findings"]["cdn_check"].update({asset: res})
 
     return res
 
@@ -630,10 +669,10 @@ def _waf_check(scan_id: str, asset: str, datatype: str) -> dict:
 
         scan_lock = threading.RLock()
         with scan_lock:
-            if "waf_check" not in this.scans[scan_id]["findings"].keys():
-                this.scans[scan_id]["findings"]["waf_check"] = {}
+            if "waf_check" not in engine.scans[scan_id]["findings"].keys():
+                engine.scans[scan_id]["findings"]["waf_check"] = {}
             if bool(res):
-                this.scans[scan_id]["findings"]["waf_check"].update({asset: res})
+                engine.scans[scan_id]["findings"]["waf_check"].update({asset: res})
 
     return res
 
@@ -649,10 +688,10 @@ def _cloud_check(scan_id: str, asset: str, datatype: str) -> dict:
 
         scan_lock = threading.RLock()
         with scan_lock:
-            if "cloud_check" not in this.scans[scan_id]["findings"].keys():
-                this.scans[scan_id]["findings"]["cloud_check"] = {}
+            if "cloud_check" not in engine.scans[scan_id]["findings"].keys():
+                engine.scans[scan_id]["findings"]["cloud_check"] = {}
             if bool(res):
-                this.scans[scan_id]["findings"]["cloud_check"].update({asset: res})
+                engine.scans[scan_id]["findings"]["cloud_check"].update({asset: res})
 
     return res
 
@@ -668,10 +707,10 @@ def _saas_check(scan_id: str, asset: str, datatype: str) -> dict:
 
         scan_lock = threading.RLock()
         with scan_lock:
-            if "saas_check" not in this.scans[scan_id]["findings"].keys():
-                this.scans[scan_id]["findings"]["saas_check"] = {}
+            if "saas_check" not in engine.scans[scan_id]["findings"].keys():
+                engine.scans[scan_id]["findings"]["saas_check"] = {}
             if bool(res):
-                this.scans[scan_id]["findings"]["saas_check"].update({asset: res})
+                engine.scans[scan_id]["findings"]["saas_check"].update({asset: res})
 
     return res
 
@@ -685,7 +724,7 @@ def _do_seg_check(scan_id, asset_value):
         # seg_dict = {"status": "failed", "reason": f"no MX records found for asset '{asset_value}'"}
         return
 
-    with open(this.scanner["seg_path"]) as seg_providers_file:
+    with open(engine.scanner["seg_path"]) as seg_providers_file:
         seg_providers = json.loads(seg_providers_file.read())["seg"]
 
     for dns_record in dns_records:
@@ -699,23 +738,23 @@ def _do_seg_check(scan_id, asset_value):
 
     scan_lock = threading.RLock()
     with scan_lock:
-        if "seg_dict" not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["seg_dict"] = {}
-            this.scans[scan_id]["findings"]["seg_dict_dns_records"] = {}
+        if "seg_dict" not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["seg_dict"] = {}
+            engine.scans[scan_id]["findings"]["seg_dict_dns_records"] = {}
 
-        if asset_value not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["seg_dict"][asset_value] = {}
-            this.scans[scan_id]["findings"]["seg_dict_dns_records"][asset_value] = {}
+        if asset_value not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["seg_dict"][asset_value] = {}
+            engine.scans[scan_id]["findings"]["seg_dict_dns_records"][asset_value] = {}
 
         if has_seg is True:
-            this.scans[scan_id]["findings"]["seg_dict"][asset_value] = copy.deepcopy(
+            engine.scans[scan_id]["findings"]["seg_dict"][asset_value] = copy.deepcopy(
                 seg_dict
             )
-            this.scans[scan_id]["findings"]["seg_dict_dns_records"][asset_value] = (
+            engine.scans[scan_id]["findings"]["seg_dict_dns_records"][asset_value] = (
                 copy.deepcopy(dns_records)
             )
         else:
-            this.scans[scan_id]["findings"]["no_seg"] = {
+            engine.scans[scan_id]["findings"]["no_seg"] = {
                 asset_value: "MX records found but no Secure Email Gateway set"
             }
 
@@ -737,9 +776,9 @@ def _do_dmarc_check(scan_id, asset_value):
                         if num < 100:
                             dmarc_dict["dmarc_partial_coverage"] = "medium"
 
-    with this.scan_lock:
-        this.scans[scan_id]["findings"]["dmarc_dict"] = {asset_value: dmarc_dict}
-        this.scans[scan_id]["findings"]["dmarc_dict_dns_records"] = {
+    with engine.metadata["scan_lock"]:
+        engine.scans[scan_id]["findings"]["dmarc_dict"] = {asset_value: dmarc_dict}
+        engine.scans[scan_id]["findings"]["dmarc_dict_dns_records"] = {
             asset_value: dns_records
         }
 
@@ -761,9 +800,9 @@ def _do_dkim_check(scan_id, asset_value):
     else:
         dkim_dict["dkim"] = dkim_found_list
 
-    with this.scan_lock:
-        this.scans[scan_id]["findings"]["dkim_dict"] = {asset_value: dkim_dict}
-        this.scans[scan_id]["findings"]["dkim_dict_dns_records"] = {
+    with engine.metadata["scan_lock"]:
+        engine.scans[scan_id]["findings"]["dkim_dict"] = {asset_value: dkim_dict}
+        engine.scans[scan_id]["findings"]["dkim_dict_dns_records"] = {
             asset_value: dns_records
         }
 
@@ -806,9 +845,9 @@ def _do_spf_check(scan_id: int, asset_value: str) -> None:
                 )
             )
 
-    with this.scan_lock:
-        this.scans[scan_id]["findings"].setdefault("spf_issues", {})
-        this.scans[scan_id]["findings"]["spf_issues"][asset_value] = {
+    with engine.metadata["scan_lock"]:
+        engine.scans[scan_id]["findings"].setdefault("spf_issues", {})
+        engine.scans[scan_id]["findings"]["spf_issues"][asset_value] = {
             "issues": issues,
             "parsed_spf_record": parsed_spf_record,
         }
@@ -823,7 +862,6 @@ def _parse_spf_record(dns_records: list[str]) -> tuple[list, list]:
     designed_sender_mechanisms = ["a", "mx", "ptr", "ip4", "ip6", "exists"]
 
     spf_record_count = 0
-    parsed_spf_record = [["Qualifier", "Type", "Value"]]
     issues = []
 
     for dns_record in dns_records:
@@ -1005,13 +1043,13 @@ def get_lookup_count_and_spf_records(domain: str) -> tuple[int, list[tuple[str, 
 def _dns_resolve(scan_id, asset, check_subdomains=False):
     scan_lock = threading.RLock()
     with scan_lock:
-        if "dns_resolve" not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["dns_resolve"] = {}
-        this.scans[scan_id]["findings"]["dns_resolve"][asset] = {}
-        this.scans[scan_id]["findings"]["dns_resolve"][asset] = copy.deepcopy(
+        if "dns_resolve" not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["dns_resolve"] = {}
+        engine.scans[scan_id]["findings"]["dns_resolve"][asset] = {}
+        engine.scans[scan_id]["findings"]["dns_resolve"][asset] = copy.deepcopy(
             _dns_resolve_asset(asset)
         )
-    return this.scans[scan_id]["findings"]["dns_resolve"][asset]
+    return engine.scans[scan_id]["findings"]["dns_resolve"][asset]
 
 
 def _dns_resolve_asset(
@@ -1023,7 +1061,7 @@ def _dns_resolve_asset(
         record_types = [type_of_record]
     for record_type in record_types:
         try:
-            answers = this.resolver.resolve(asset, record_type)
+            answers = engine.metadata["resolver"].query(asset, record_type)
         except dns.resolver.NoAnswer:
             pass
         except dns.resolver.Timeout:
@@ -1056,7 +1094,9 @@ def _reverse_dns(scan_id, asset):
         return res
 
     try:
-        answers = this.resolver.query(dns.reversename.from_address(asset), "PTR")
+        answers = engine.metadata["resolver"].query(
+            dns.reversename.from_address(asset), "PTR"
+        )
         res.update({asset: [str(rdata) for rdata in answers]})
     except dns.resolver.NoAnswer:
         pass
@@ -1067,10 +1107,10 @@ def _reverse_dns(scan_id, asset):
 
     scan_lock = threading.RLock()
     with scan_lock:
-        if "reverse_dns" not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["reverse_dns"] = {}
+        if "reverse_dns" not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["reverse_dns"] = {}
         if bool(res):
-            this.scans[scan_id]["findings"]["reverse_dns"].update(res)
+            engine.scans[scan_id]["findings"]["reverse_dns"].update(res)
 
     return res
 
@@ -1116,10 +1156,10 @@ def _get_whois(scan_id, asset):
 
     scan_lock = threading.RLock()
     with scan_lock:
-        if "whois" not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["whois"] = {}
+        if "whois" not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["whois"] = {}
         if bool(res):
-            this.scans[scan_id]["findings"]["whois"].update(res)
+            engine.scans[scan_id]["findings"]["whois"].update(res)
 
     return res
 
@@ -1259,18 +1299,18 @@ def _subdomain_bruteforce(scan_id, asset):
             valid_sudoms.append(subdom)
 
     # add the subdomain in scan['findings']['subdomains_list'] if not exists
-    # if 'do_subdomains_resolve' in this.scans[scan_id]['options'].keys() and this.scans[scan_id]['options']['do_subdomains_resolve']:
+    # if 'do_subdomains_resolve' in engine.scans[scan_id]['options'].keys() and engine.scans[scan_id]['options']['do_subdomains_resolve']:
     #     print("passe la")
-    #     if 'subdomains_list' in this.scans[scan_id]['findings'].keys():
-    #         if asset in this.scans[scan_id]['findings']['subdomains_list']:
-    #             if subdom not in this.scans[scan_id]['findings']['subdomains_list'][asset]:
-    #                 this.scans[scan_id]['findings']['subdomains_list'][asset].extend(valid_sudoms)
+    #     if 'subdomains_list' in engine.scans[scan_id]['findings'].keys():
+    #         if asset in engine.scans[scan_id]['findings']['subdomains_list']:
+    #             if subdom not in engine.scans[scan_id]['findings']['subdomains_list'][asset]:
+    #                 engine.scans[scan_id]['findings']['subdomains_list'][asset].extend(valid_sudoms)
     #         else:
-    #             this.scans[scan_id]['findings']['subdomains_list'][asset] = valid_sudoms
+    #             engine.scans[scan_id]['findings']['subdomains_list'][asset] = valid_sudoms
     #     else:
-    #         this.scans[scan_id]['findings']['subdomains_list'] = {}
-    #         this.scans[scan_id]['findings']['subdomains_list'][asset] = valid_sudoms
-    # @todo: mutex on this.scans[scan_id]['findings']['subdomains_resolve']
+    #         engine.scans[scan_id]['findings']['subdomains_list'] = {}
+    #         engine.scans[scan_id]['findings']['subdomains_list'][asset] = valid_sudoms
+    # @todo: mutex on engine.scans[scan_id]['findings']['subdomains_resolve']
 
     return res
 
@@ -1295,25 +1335,25 @@ def _subdomain_enum(scan_id, asset):
 
     res.update({asset: sub_res})
 
-    if "subdomains_list" in this.scans[scan_id]["findings"].keys():
-        if asset in this.scans[scan_id]["findings"]["subdomains_list"]:
+    if "subdomains_list" in engine.scans[scan_id]["findings"].keys():
+        if asset in engine.scans[scan_id]["findings"]["subdomains_list"]:
             for subdom in sub_res:
                 if (
                     subdom
-                    not in this.scans[scan_id]["findings"]["subdomains_list"][asset]
+                    not in engine.scans[scan_id]["findings"]["subdomains_list"][asset]
                 ):
-                    this.scans[scan_id]["findings"]["subdomains_list"][asset].extend(
+                    engine.scans[scan_id]["findings"]["subdomains_list"][asset].extend(
                         sub_res
                     )
         else:
-            this.scans[scan_id]["findings"]["subdomains_list"][asset] = list(sub_res)
+            engine.scans[scan_id]["findings"]["subdomains_list"][asset] = list(sub_res)
     else:
-        this.scans[scan_id]["findings"]["subdomains_list"] = {}
-        this.scans[scan_id]["findings"]["subdomains_list"][asset] = list(sub_res)
+        engine.scans[scan_id]["findings"]["subdomains_list"] = {}
+        engine.scans[scan_id]["findings"]["subdomains_list"][asset] = list(sub_res)
 
     if (
-        "do_subdomains_resolve" in this.scans[scan_id]["options"].keys()
-        and this.scans[scan_id]["options"]["do_subdomains_resolve"]
+        "do_subdomains_resolve" in engine.scans[scan_id]["options"].keys()
+        and engine.scans[scan_id]["options"]["do_subdomains_resolve"]
     ):
         res_subdomains = {}
         for s in sub_res:
@@ -1321,12 +1361,12 @@ def _subdomain_enum(scan_id, asset):
             if len(data) > 0:
                 res_subdomains.update({s: data})
 
-        # with this.scan_lock:
-        if "subdomains_resolve" not in this.scans[scan_id]["findings"].keys():
-            this.scans[scan_id]["findings"]["subdomains_resolve"] = {}
-        if asset not in this.scans[scan_id]["findings"]["subdomains_resolve"].keys():
-            this.scans[scan_id]["findings"]["subdomains_resolve"][asset] = {}
-        this.scans[scan_id]["findings"]["subdomains_resolve"][asset].update(
+        # with engine.scan_lock:
+        if "subdomains_resolve" not in engine.scans[scan_id]["findings"].keys():
+            engine.scans[scan_id]["findings"]["subdomains_resolve"] = {}
+        if asset not in engine.scans[scan_id]["findings"]["subdomains_resolve"].keys():
+            engine.scans[scan_id]["findings"]["subdomains_resolve"][asset] = {}
+        engine.scans[scan_id]["findings"]["subdomains_resolve"][asset].update(
             res_subdomains
         )
 
@@ -1335,35 +1375,36 @@ def _subdomain_enum(scan_id, asset):
 
 @app.route("/engines/owl_dns/stop/<scan_id>")
 def stop_scan(scan_id):
+    # leaving engine because of futures field in status_scan
     res = {"page": "stop"}
 
-    if scan_id not in this.scans.keys():
+    if scan_id not in engine.scans.keys():
         res.update(
             {"status": "error", "reason": "scan_id '{}' not found".format(scan_id)}
         )
         return jsonify(res)
 
-    scan_status(scan_id)
-    if this.scans[scan_id]["status"] != "SCANNING":
+    status_scan(scan_id)
+    if engine.scans[scan_id]["status"] != "SCANNING":
         res.update(
             {
                 "status": "error",
                 "reason": "scan '{}' is not running (status={})".format(
-                    scan_id, this.scans[scan_id]["status"]
+                    scan_id, engine.scans[scan_id]["status"]
                 ),
             }
         )
         return jsonify(res)
 
-    for t in this.scans[scan_id]["threads"]:
+    for t in engine.scans[scan_id]["threads"]:
         try:
             t.join()
-            this.scans[scan_id]["threads"].remove(t)
+            engine.scans[scan_id]["threads"].remove(t)
         except Exception:
             pass
 
-    this.scans[scan_id]["status"] = "STOPPED"
-    this.scans[scan_id]["finished_at"] = int(time.time() * 1000)
+    engine.scans[scan_id]["status"] = "STOPPED"
+    engine.scans[scan_id]["finished_at"] = int(time.time() * 1000)
 
     res.update({"status": "success"})
     return jsonify(res)
@@ -1373,7 +1414,7 @@ def stop_scan(scan_id):
 @app.route("/engines/owl_dns/stopscans", methods=["GET"])
 def stop():
     res = {"page": "stopscans"}
-    for scan_id in this.scans.keys():
+    for scan_id in engine.scans.keys():
         stop_scan(scan_id)
 
     res.update({"status": "SUCCESS"})
@@ -1382,138 +1423,136 @@ def stop():
 
 @app.route("/engines/owl_dns/clean")
 def clean():
-    res = {"page": "clean"}
-    stop()
-    this.scans.clear()
-    # _loadconfig()
-    res.update({"status": "SUCCESS"})
-    return jsonify(res)
+    """Clean all scans."""
+    reloadconfig()
+    return engine.clean()
 
 
 @app.route("/engines/owl_dns/clean/<scan_id>")
 def clean_scan(scan_id):
-    res = {"page": "clean_scan"}
-    res.update({"scan_id": scan_id})
-
-    if scan_id not in this.scans.keys():
-        res.update(
-            {"status": "error", "reason": "scan_id '{}' not found".format(scan_id)}
-        )
-        return jsonify(res)
-
-    # Terminate thread if any
-    for t in this.scans[scan_id]["threads"]:
-        try:
-            t.join()
-            this.scans[scan_id]["threads"].remove(t)
-        except Exception as e:
-            print(e)
-            pass
-
-    # Remove Scan for current scans
-    this.scans.pop(scan_id)
-    res.update({"status": "removed"})
-    return jsonify(res)
+    """Clean scan identified by id."""
+    return engine.clean_scan(scan_id)
 
 
 @app.route("/engines/owl_dns/status/<scan_id>")
-def scan_status(scan_id):
-    if scan_id not in this.scans.keys():
+def status_scan(scan_id):
+    if scan_id not in engine.scans.keys():
         return jsonify(
             {"status": "ERROR", "details": "scan_id '{}' not found".format(scan_id)}
         )
 
     all_threads_finished = True
 
-    if "threads" in this.scans[scan_id]:
-        for t in this.scans[scan_id]["threads"]:
+    if "threads" in engine.scans[scan_id]:
+        for t in engine.scans[scan_id]["threads"]:
             if t.is_alive():
-                this.scans[scan_id]["status"] = "SCANNING"
+                engine.scans[scan_id]["status"] = "SCANNING"
                 all_threads_finished = False
                 break
             else:
                 # Terminate thread
                 t.join()
-                this.scans[scan_id]["threads"].remove(t)
+                engine.scans[scan_id]["threads"].remove(t)
 
-    if "futures" in this.scans[scan_id]:
-        for f in this.scans[scan_id]["futures"]:
+    if "futures" in engine.scans[scan_id]:
+        for f in engine.scans[scan_id]["futures"]:
             if not f.done():
-                this.scans[scan_id]["status"] = "SCANNING"
+                engine.scans[scan_id]["status"] = "SCANNING"
                 all_threads_finished = False
                 break
             else:
-                # try:
-                #     dnstwist_asset, dnstwist_results = f.result()
-                #     this.scans[scan_id]['dnstwist'][dnstwist_asset] = dnstwist_results
-                # except Exception:
-                #     pass
-                this.scans[scan_id]["futures"].remove(f)
+                try:
+                    dnstwist_asset, dnstwist_results = f.result()
+                    engine.scans[scan_id]["dnstwist"][dnstwist_asset] = dnstwist_results
+                except Exception:
+                    pass
+                engine.scans[scan_id]["futures"].remove(f)
 
-    if "threads" not in this.scans[scan_id] and "futures" not in this.scans[scan_id]:
-        this.scans[scan_id]["status"] = "STARTED"
+    if (
+        "threads" not in engine.scans[scan_id]
+        and "futures" not in engine.scans[scan_id]
+    ):
+        engine.scans[scan_id]["status"] = "STARTED"
         all_threads_finished = False
 
     try:
         if (
             all_threads_finished
-            and len(this.scans[scan_id]["threads"]) == 0
-            and len(this.scans[scan_id]["futures"]) == 0
+            and len(engine.scans[scan_id]["threads"]) == 0
+            and len(engine.scans[scan_id]["futures"]) == 0
         ):
-            this.scans[scan_id]["status"] = "FINISHED"
-            this.scans[scan_id]["finished_at"] = int(time.time() * 1000)
+            engine.scans[scan_id]["status"] = "FINISHED"
+            engine.scans[scan_id]["finished_at"] = int(time.time() * 1000)
     except Exception:
         pass
 
-    return jsonify({"status": this.scans[scan_id]["status"]})
+    return jsonify({"status": engine.scans[scan_id]["status"]})
+
+
+@app.route("/engines/owl_dns/fullstatus")
+def get_full_status(self):
+    """Return engine status with all assets on scans."""
+    return _status_owl_dns(True)
 
 
 @app.route("/engines/owl_dns/status")
 def status():
+    return _status_owl_dns()
+
+
+def _status_owl_dns(full_status=False):
+    """Get the status of the engine and all its scans."""
+    # FIXME ARS-280 this is c/c because of weird use of threadpool and futures field
     res = {"page": "status"}
+    engine.scanner["status"] = "READY"
+    status_code = 200
 
-    if len(this.scans) == APP_MAXSCANS * 2:
-        this.scanner["status"] = "BUSY"
-    else:
-        this.scanner["status"] = "READY"
+    # display info on the scanner
+    res.update({"scanner": engine.scanner})
 
-    scans = []
-    for scan_id in this.scans.keys():
-        scan_status(scan_id)
-        scans.append(
-            {
-                scan_id: {
-                    "status": this.scans[scan_id]["status"],
-                    "started_at": this.scans[scan_id]["started_at"],
-                    "assets": this.scans[scan_id]["assets"],
+    # display the status of scans performed
+    scans = {}
+    all_scans = list(engine.scans.keys()).copy()
+    for scan in all_scans:
+        try:
+            engine.status_scan(scan)
+            scans.update(
+                {
+                    scan: {
+                        "status": engine.scans[scan]["status"],
+                        "options": engine.scans[scan]["options"],
+                        "nb_findings": engine.scans[scan]["nb_findings"],
+                        "nb_assets": len(engine.scans[scan]["assets"]),
+                        "position": engine.scans[scan]["position"],
+                        "root_scan_id": engine.scans[scan]["root_scan_id"],
+                    }
                 }
-            }
-        )
+            )
+            if full_status:
+                scans[scan].update({"assets": engine.scans[scan]["assets"]})
+        except Exception:
+            pass
+    res.update({"scans": scans})
 
-    res.update(
-        {
-            "nb_scans": len(this.scans),
-            "status": this.scanner["status"],
-            "scanner": this.scanner,
-            "scans": scans,
-        }
-    )
+    if engine._engine_is_busy() is True:
+        engine.scanner["status"] = "BUSY"
 
-    return jsonify(res)
+    conf_file = engine.base_dir + "/" + engine.name + ".json"
+    if not os.path.exists(conf_file):
+        engine.scanner["status"] = "ERROR"
 
-
-@app.route("/engines/owl_dns/info")
-def info():
-    status()
-    return jsonify({"page": "info", "engine_config": this.scanner})
+    res.update({"status": engine.scanner["status"]})
+    if engine.scanner["status"] == "ERROR":
+        status_code = 500
+    return jsonify(res), status_code
 
 
 def _parse_results(scan_id):
     issues = []
     summary = {}
 
-    # scan = this.scans[scan_id]
-    scan = copy.deepcopy(this.scans[scan_id])
+    # scan = engine.scans[scan_id]
+    scan = copy.deepcopy(engine.scans[scan_id])
     nb_vulns = {
         "info": 0,
         "low": 0,
@@ -1524,12 +1563,11 @@ def _parse_results(scan_id):
     ts = int(time.time() * 1000)
 
     # dnstwist
-    # print(this.scans[scan_id]['dnstwist'].keys())
-    if "dnstwist" in this.scans[scan_id].keys():
-        for asset in this.scans[scan_id]["dnstwist"].keys():
+    if "dnstwist" in engine.scans[scan_id].keys():
+        for asset in engine.scans[scan_id]["dnstwist"].keys():
             try:
-                dnstwist_issues = dnstwist.parse_results(
-                    ts, asset, this.scans[scan_id]["dnstwist"][asset]
+                dnstwist_issues = DnsTwist.parse_results(
+                    ts, asset, engine.scans[scan_id]["dnstwist"][asset]
                 )
             except KeyError:
                 app.logger.error("dnstwist: missing result (domain-name)")
@@ -1539,13 +1577,13 @@ def _parse_results(scan_id):
                 issues.append(dnstwist_issue)
 
     # dns resolve
-    if "dns_resolve" in this.scans[scan_id]["findings"].keys():
-        for asset in this.scans[scan_id]["findings"]["dns_resolve"].keys():
+    if "dns_resolve" in engine.scans[scan_id]["findings"].keys():
+        for asset in engine.scans[scan_id]["findings"]["dns_resolve"].keys():
             dns_resolve_str = ""
-            dns_records = this.scans[scan_id]["findings"]["dns_resolve"][asset]
+            dns_records = engine.scans[scan_id]["findings"]["dns_resolve"][asset]
             # print(asset, dns_records)
             # for key, value in sorted(scan['findings']['dns_resolve'].items(), key=lambda x:x[1], reverse=True):
-            # for key, value in sorted(this.scans[scan_id]['findings']['dns_resolve'][asset].items(), key=lambda x:x[1], reverse=True):
+            # for key, value in sorted(engine.scans[scan_id]['findings']['dns_resolve'][asset].items(), key=lambda x:x[1], reverse=True):
             # for value in dns_records:
             #     for record in value:
             #         entry = "Record type '{}': {}".format(record['record_type'], ", ".join(record['values']))
@@ -2340,7 +2378,7 @@ def _parse_results(scan_id):
         "nb_high": nb_vulns["high"],
         "nb_critical": nb_vulns["critical"],
         "engine_name": "owl_dns",
-        "engine_version": this.scanner["version"],
+        "engine_version": engine.scanner["version"],
     }
 
     return issues, summary
@@ -2355,18 +2393,18 @@ def getfindings(scan_id):
         )
 
     # check if the scan_id exists
-    if scan_id not in this.scans.keys():
+    if scan_id not in engine.scans.keys():
         res.update({"status": "error", "reason": f"scan_id '{scan_id}' not found"})
         return jsonify(res)
 
     # check if the scan is finished
     # status()
-    scan_status(scan_id)
-    if this.scans[scan_id]["status"] != "FINISHED":
+    status_scan(scan_id)
+    if engine.scans[scan_id]["status"] != "FINISHED":
         res.update(
             {
                 "status": "error",
-                "reason": f"scan_id '{scan_id}' not finished (status={this.scans[scan_id]['status']})",
+                "reason": f"scan_id '{scan_id}' not finished (status={engine.scans[scan_id]['status']})",
             }
         )
         return jsonify(res)
@@ -2393,59 +2431,20 @@ def getfindings(scan_id):
 
 @app.route("/engines/owl_dns/getreport/<scan_id>")
 def getreport(scan_id):
-    if not scan_id.isdecimal():
-        return jsonify(
-            {"status": "error", "reason": "scan_id must be numeric digits only"}
-        )
-    filepath = f"{BASE_DIR}/results/owl_dns_{scan_id}.json"
-
-    if not os.path.exists(filepath):
-        return jsonify(
-            {
-                "status": "error",
-                "reason": f"report file for scan_id '{scan_id}' not found",
-            }
-        )
-
-    return send_from_directory(f"{BASE_DIR}/results/", "owl_dns_{scan_id}.json")
-
-
-def _json_serial(obj):
-    """
-    JSON serializer for objects not serializable by default json code
-    Used for datetime serialization when the results are written in file
-    """
-    if isinstance(obj, datetime.datetime) or isinstance(obj, datetime.date):
-        serial = obj.isoformat()
-        return serial
-    raise TypeError("Type not serializable")
+    """Get report on finished scans."""
+    return engine.getreport(scan_id)
 
 
 @app.route("/engines/owl_dns/test")
 def test():
-    if not APP_DEBUG:
-        return jsonify({"page": "test"})
-
-    res = "<h2>Test Page (DEBUG):</h2>"
-    for rule in app.url_map.iter_rules():
-        options = {}
-        for arg in rule.arguments:
-            options[arg] = "[{0}]".format(arg)
-
-        methods = ",".join(rule.methods)
-        url = url_for(rule.endpoint, **options)
-        res += urllib.request.url2pathname(
-            "{0:50s} {1:20s} <a href='{2}'>{2}</a><br/>".format(
-                rule.endpoint, methods, url
-            )
-        )
-
-    return res
+    """Return test page."""
+    return engine.test()
 
 
 @app.errorhandler(404)
 def page_not_found(e):
-    return jsonify({"page": "not found"})
+    """Page not found."""
+    return engine.page_not_found()
 
 
 @app.before_first_request
