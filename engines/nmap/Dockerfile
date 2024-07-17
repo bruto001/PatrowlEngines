@@ -1,5 +1,5 @@
 FROM alpine:3.16.3
-LABEL Name="Nmap\ \(Patrowl engine\)" Version="1.5.0rc2"
+LABEL Name="Nmap\ \(Patrowl engine\)" Version="1.5.0"
 
 # Set the working directory
 RUN mkdir -p /opt/patrowl-engines/nmap
