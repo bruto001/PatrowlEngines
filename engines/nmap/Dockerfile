@@ -1,5 +1,5 @@
 FROM alpine:3.16.3
-LABEL Name="Nmap\ \(Patrowl engine\)" Version="1.5.0"
+LABEL Name="Nmap\ \(Patrowl engine\)" Version="1.5.1"
 
 # Set the working directory
 RUN mkdir -p /opt/patrowl-engines/nmap
@@ -19,15 +19,15 @@ COPY libs/ libs/
 
 # Install any needed packages specified in requirements.txt
 RUN apk add --update \
-	linux-headers \
-	libffi-dev \
-    #sudo \
-    python3 \
-    python3-dev \
-    py3-pip \
-    build-base \
-    nmap \
-    nmap-scripts \
+  linux-headers \
+  libffi-dev \
+  #sudo \
+  python3 \
+  python3-dev \
+  py3-pip \
+  build-base \
+  nmap \
+  nmap-scripts \
   #&& adduser -u 1000 -G wheel -D alpine \
   && rm -rf /var/cache/apk/*
 
