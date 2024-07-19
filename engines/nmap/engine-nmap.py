@@ -86,6 +86,16 @@ def clean():
 @app.route("/engines/nmap/clean/<scan_id>")
 def clean_scan(scan_id):
     """Clean scan identified by id."""
+    if scan_id not in engine.scans.keys():
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "reason": f"Error 1002: scan_id '{scan_id}' not found",
+                }
+            ),
+            503,
+        )
     return engine.clean_scan(scan_id)
 
 
@@ -568,7 +578,8 @@ def _parse_report(filename, scan_id):
         # Find hostnames
         for hostnames in host.findall("hostnames"):
             for hostname in list(hostnames):
-                if hostname.get("type") in ["user", "PTR"]:
+                # if hostname.get("type") in ["user", "PTR"]:
+                if hostname.get("type") == "user":
                     has_hostnames = True
                     addr = hostname.get("name")
                     addr_list.append(hostname.get("name"))
@@ -592,6 +603,8 @@ def _parse_report(filename, scan_id):
         if has_hostnames:
             for hostnames in host.findall("hostnames"):
                 for hostname in list(hostnames):
+                    if hostname.get("type") != "user":
+                        continue
                     ip_address = str(host.find("address").get("addr"))
                     issues.append(
                         deepcopy(
@@ -1049,7 +1062,7 @@ def getfindings(scan_id):
         os.remove(hosts_filename)
 
     # remove the scan from the active scan list
-    engine.clean_scan(scan_id)
+    # engine.clean_scan(scan_id)
 
     res.update({"summary": summary, "issues": issues, "status": "success"})
     return jsonify(res)
